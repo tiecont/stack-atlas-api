@@ -1,0 +1,6 @@
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "instance": "/api/v1/articles/missing"
+}

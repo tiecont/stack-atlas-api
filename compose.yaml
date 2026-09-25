@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: stack_atlas
+      POSTGRES_USER: stack_atlas
+      POSTGRES_PASSWORD: stack_atlas_local
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - stack-atlas-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stack_atlas -d stack_atlas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  stack-atlas-postgres:
