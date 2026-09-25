@@ -1,19 +1,64 @@
+# Development environment only. CI and deployments build the production target.
+name: stack-atlas-api
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: stack-atlas-api-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: stack_atlas
-      POSTGRES_USER: stack_atlas
-      POSTGRES_PASSWORD: stack_atlas_local
+      POSTGRES_DB: ${POSTGRES_DB:-stack_atlas}
+      POSTGRES_USER: ${POSTGRES_USER:-stack_atlas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stack_atlas_local}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - stack-atlas-postgres:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/10-create-test-database.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stack_atlas -d stack_atlas"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 10
+      start_period: 5s
+    networks:
+      - stack-atlas-api
+
+  api:
+    build:
+      context: .
+      target: development
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    container_name: stack-atlas-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-stack_atlas_session}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-stack_atlas}:${POSTGRES_PASSWORD:-stack_atlas_local}@postgres:5432/${POSTGRES_DB:-stack_atlas}
+      PORT: "3000"
+    volumes:
+      - .:/app
+      - stack_atlas_api_node_modules:/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - stack-atlas-api
 
 volumes:
-  stack-atlas-postgres:
+  postgres_data:
+    name: stack-atlas-api-postgres-data
+  stack_atlas_api_node_modules:
+    name: stack-atlas-api-node-modules
+
+networks:
+  stack-atlas-api:
+    name: stack-atlas-api-network
+    driver: bridge

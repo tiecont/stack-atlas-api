@@ -12,15 +12,16 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src test",
+    "lint": "eslint src test scripts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "vitest run --config vitest.e2e.config.mts",
     "test:integration": "vitest run --config vitest.integration.config.mts",
-    "migration": "node-pg-migrate --migrations-dir database/migrations",
-    "migration:create": "node-pg-migrate create --migrations-dir database/migrations --migration-file-language js",
-    "migration:up": "node-pg-migrate up --migrations-dir database/migrations",
-    "migration:down": "node-pg-migrate down --migrations-dir database/migrations"
+    "migrate": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js up --migrations-dir 'database/migrations/**/*.{js,cjs}' --use-glob",
+    "migration": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js --migrations-dir 'database/migrations/**/*.{js,cjs}' --use-glob",
+    "migration:create": "node ./scripts/create-migration.mjs",
+    "migration:up": "npm run migrate",
+    "migration:down": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js down --migrations-dir 'database/migrations/**/*.{js,cjs}' --use-glob"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.0",
@@ -31,6 +32,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "dotenv": "^17.2.2",
+    "node-pg-migrate": "^9.0.0",
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"
@@ -43,7 +45,6 @@
     "@types/pg": "^8.23.1",
     "@types/supertest": "^6.0.3",
     "eslint": "^10.11.0",
-    "node-pg-migrate": "^9.0.0",
     "supertest": "^7.1.4",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.40.0",

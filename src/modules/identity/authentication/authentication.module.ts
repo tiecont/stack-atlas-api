@@ -1,15 +1,16 @@
 import { Module } from '@nestjs/common';
-import { DatabaseModule } from '../../../database/database.module';
-import { AuthenticationController } from './authentication.controller';
-import { AuthenticationService } from './authentication.service';
-import { OriginGuard } from './origin.guard';
-import { PasswordHasher } from './password-hasher.service';
-import { SessionAuthGuard } from './session-auth.guard';
+import { AccountController } from '../account/controllers/account.controller';
+import { AccountModule } from '../account/account.module';
+import { SessionModule } from '../session/session.module';
+import { AuthenticationController } from './controllers/authentication.controller';
+import { AuthenticationService } from './services/authentication.service';
+import { OriginGuard } from './guards/origin.guard';
+import { SessionAuthGuard } from './guards/session-auth.guard';
 
 @Module({
-  imports: [DatabaseModule],
-  controllers: [AuthenticationController],
-  providers: [AuthenticationService, OriginGuard, PasswordHasher, SessionAuthGuard],
-  exports: [OriginGuard, PasswordHasher, SessionAuthGuard],
+  imports: [AccountModule, SessionModule],
+  controllers: [AuthenticationController, AccountController],
+  providers: [AuthenticationService, OriginGuard, SessionAuthGuard],
+  exports: [OriginGuard, SessionAuthGuard],
 })
 export class AuthenticationModule {}
