@@ -65,9 +65,14 @@ Identity v1 provides:
 - `POST /api/v1/auth/logout` — durably revoke the current session (`204`)
 
 Account email is trimmed and lowercased. PostgreSQL enforces uniqueness and
-normalization. Passwords use scrypt; session tokens are random 256-bit values,
-and only their SHA-256 digests are stored. A session principal comes from the
-active database session, never from request ownership fields.
+normalization. The registration path is `AccountController -> AccountService ->
+AccountRepository -> DatabaseService`; authentication owns login, logout, and
+the current-account route, while session SQL belongs to `SessionRepository`.
+Password hashing stays in Account. Reusable exact-origin enforcement lives in
+the common HTTP security boundary. Passwords use scrypt; session tokens are
+random 256-bit values, and only their SHA-256 digests are stored. A session
+principal comes from the active database session, never from request ownership
+fields.
 
 Errors use RFC 9457 `application/problem+json`. Responses include a generated
 `X-Request-Id`, repeated as the `requestId` Problem Details extension. Error
@@ -77,6 +82,8 @@ also reject a supplied Origin that is outside that allowlist.
 
 The current cookie policy assumes same-site Web/API deployment. A cross-site
 deployment needs an explicit CSRF design and cookie policy update before use.
+Only supplied Origin headers are checked against the exact configured allowlist;
+browser clients are expected to use the same-site deployment described above.
 Email verification and password recovery are not implemented. Login has no
 shared rate limiter; add edge or durable shared rate limiting before public
 credential traffic. MFA and session-management UI are later identity work.
@@ -105,6 +112,13 @@ and use expand, backfill, verify, then contract for destructive evolution.
 `DatabaseService` owns the single pool lifecycle and exposes a checked-out-client
 transaction primitive. Identity operations currently need only single-row SQL
 statements; PostgreSQL constraints remain authoritative under concurrent writes.
+There is no global `statement_timeout` until a measured requirement justifies
+one.
+
+The email normalization migration checks for collisions under
+`lower(btrim(email))` before changing any row. It aborts with a collision count
+and leaves data unchanged if resolution is needed; otherwise it normalizes
+legacy values and adds a database check for future writes.
 
 ## Docker development and production
 
@@ -125,6 +139,11 @@ does not yet define a production deployment environment or credentials, so CD
 ends at publishing the verified image.
 
 ## Checks
+
+`npm ci` installs the Husky pre-commit hook. Commits run ESLint and Prettier on
+staged TypeScript files, then run `npm run test:precommit` (typecheck, lint, unit
+tests, and build). PostgreSQL integration and HTTP end-to-end tests stay in CI
+because they require a disposable PostgreSQL database.
 
 Unit and HTTP foundation tests:
 

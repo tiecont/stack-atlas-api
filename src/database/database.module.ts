@@ -19,7 +19,6 @@ const logger = new Logger('DatabasePool');
           max: config.database.poolMax,
           connectionTimeoutMillis: 3_000,
           idleTimeoutMillis: 30_000,
-          statement_timeout: 3_000,
           application_name: 'stack-atlas-api',
         });
         pool.on('error', () => {

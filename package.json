@@ -17,11 +17,13 @@
     "test:watch": "vitest",
     "test:e2e": "vitest run --config vitest.e2e.config.mts",
     "test:integration": "vitest run --config vitest.integration.config.mts",
+    "test:precommit": "npm run typecheck && npm run lint && npm test && npm run build",
     "migrate": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js up --migrations-dir 'database/migrations/**/*.{js,cjs}' --use-glob",
     "migration": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js --migrations-dir 'database/migrations/**/*.{js,cjs}' --use-glob",
     "migration:create": "node ./scripts/create-migration.mjs",
     "migration:up": "npm run migrate",
-    "migration:down": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js down --migrations-dir 'database/migrations/**/*.{js,cjs}' --use-glob"
+    "migration:down": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate.js down --migrations-dir 'database/migrations/**/*.{js,cjs}' --use-glob",
+    "prepare": "node -e \"if (process.env.NODE_ENV !== 'production') require('child_process').execFileSync('husky', { stdio: 'inherit' })\""
   },
   "dependencies": {
     "@nestjs/common": "^11.1.0",
@@ -45,9 +47,18 @@
     "@types/pg": "^8.23.1",
     "@types/supertest": "^6.0.3",
     "eslint": "^10.11.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.1",
+    "prettier": "^3.9.9",
     "supertest": "^7.1.4",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.40.0",
     "vitest": "^4.1.10"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ]
   }
 }

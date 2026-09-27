@@ -1,16 +1,16 @@
 import { Module } from '@nestjs/common';
-import { AccountController } from '../account/controllers/account.controller';
+import { HttpSecurityModule } from '../../../common/http/security/http-security.module';
 import { AccountModule } from '../account/account.module';
 import { SessionModule } from '../session/session.module';
+import { CurrentAccountController } from './controllers/current-account.controller';
 import { AuthenticationController } from './controllers/authentication.controller';
 import { AuthenticationService } from './services/authentication.service';
-import { OriginGuard } from './guards/origin.guard';
 import { SessionAuthGuard } from './guards/session-auth.guard';
 
 @Module({
-  imports: [AccountModule, SessionModule],
-  controllers: [AuthenticationController, AccountController],
-  providers: [AuthenticationService, OriginGuard, SessionAuthGuard],
-  exports: [OriginGuard, SessionAuthGuard],
+  imports: [AccountModule, SessionModule, HttpSecurityModule],
+  controllers: [AuthenticationController, CurrentAccountController],
+  providers: [AuthenticationService, SessionAuthGuard],
+  exports: [SessionAuthGuard],
 })
 export class AuthenticationModule {}

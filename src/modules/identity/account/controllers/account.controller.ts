@@ -1,29 +1,14 @@
+import { Body, Controller, Header, Post, UseGuards } from '@nestjs/common';
 import {
-  Body,
-  Controller,
-  Get,
-  Header,
-  Post,
-  Req,
-  UseGuards,
-} from '@nestjs/common';
-import {
-  ApiCookieAuth,
   ApiCreatedResponse,
   ApiExtraModels,
-  ApiOkResponse,
   ApiOperation,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import type { Request } from 'express';
 import { ProblemDetailsDto } from '../../../../common/openapi/problem-details.dto';
 import { problemDetailsResponse } from '../../../../common/openapi/problem-response';
-import { OriginGuard } from '../../authentication/guards/origin.guard';
-import {
-  SessionAuthGuard,
-  type AuthenticatedRequest,
-} from '../../authentication/guards/session-auth.guard';
+import { OriginGuard } from '../../../../common/http/security/origin.guard';
 import { AccountResponseDto, CreateAccountDto } from '../dto/account.dto';
 import { AccountService } from '../services/account.service';
 
@@ -43,16 +28,5 @@ export class AccountController {
   @ApiResponse(problemDetailsResponse(409, 'Email is already registered'))
   create(@Body() input: CreateAccountDto): Promise<AccountResponseDto> {
     return this.accounts.create(input);
-  }
-
-  @Get('me')
-  @UseGuards(SessionAuthGuard)
-  @Header('Cache-Control', 'no-store')
-  @ApiCookieAuth('sessionCookie')
-  @ApiOperation({ summary: 'Get the account for the current session' })
-  @ApiOkResponse({ type: AccountResponseDto })
-  @ApiResponse(problemDetailsResponse(401, 'A valid session is required'))
-  current(@Req() request: Request & AuthenticatedRequest): AccountResponseDto {
-    return request.account;
   }
 }

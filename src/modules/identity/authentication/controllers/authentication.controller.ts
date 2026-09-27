@@ -21,10 +21,10 @@ import {
 import type { Request, Response } from 'express';
 import { ProblemDetailsDto } from '../../../../common/openapi/problem-details.dto';
 import { problemDetailsResponse } from '../../../../common/openapi/problem-response';
+import { OriginGuard } from '../../../../common/http/security/origin.guard';
 import { AccountResponseDto } from '../../account/dto/account.dto';
 import { AuthenticationService } from '../services/authentication.service';
 import { LoginDto } from '../dto/authentication.dto';
-import { OriginGuard } from '../guards/origin.guard';
 import {
   SessionAuthGuard,
   type AuthenticatedRequest,

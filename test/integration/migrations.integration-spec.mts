@@ -58,6 +58,89 @@ integration('PostgreSQL migrations', () => {
     expect(identityTables.rows[0]?.count).toBe(2);
   });
 
+  it('normalizes upgrade rows and refuses normalization collisions without data loss', async () => {
+    await runMigrations('down');
+    await pool!.query(
+      'ALTER TABLE stack_atlas.users DROP CONSTRAINT users_email_normalized',
+    );
+
+    const upperId = randomUUID();
+    const whitespaceId = randomUUID();
+    const collisionId = randomUUID();
+    const conflictingId = randomUUID();
+    const invalidWriteId = randomUUID();
+    const upperEmail = `UPPER-${upperId}@EXAMPLE.TEST`;
+    const whitespaceEmail = `  Space-${whitespaceId}@Example.Test  `;
+    const collisionEmail = `collision-${collisionId}@example.test`;
+    const conflictingEmail = ` COLLISION-${collisionId}@Example.Test `;
+
+    await pool!.query(
+      `INSERT INTO stack_atlas.users (id, email, password_hash)
+       VALUES ($1, $2, $3), ($4, $5, $3), ($6, $7, $3), ($8, $9, $3)`,
+      [
+        upperId,
+        upperEmail,
+        'migration-test-hash',
+        whitespaceId,
+        whitespaceEmail,
+        collisionId,
+        collisionEmail,
+        conflictingId,
+        conflictingEmail,
+      ],
+    );
+
+    await expect(runMigrations('up')).rejects.toThrow(
+      'Cannot normalize stack_atlas.users.email: found 1 collision group(s)',
+    );
+    const unchangedLegacyRows = await pool!.query(
+      `SELECT id, email
+       FROM stack_atlas.users
+       WHERE id = ANY($1::uuid[])
+       ORDER BY id`,
+      [[upperId, whitespaceId, collisionId, conflictingId]],
+    );
+    expect(unchangedLegacyRows.rows).toHaveLength(4);
+    expect(unchangedLegacyRows.rows).toEqual(
+      expect.arrayContaining([
+        { id: upperId, email: upperEmail },
+        { id: whitespaceId, email: whitespaceEmail },
+        { id: collisionId, email: collisionEmail },
+        { id: conflictingId, email: conflictingEmail },
+      ]),
+    );
+
+    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [conflictingId]);
+    await runMigrations('up');
+
+    const normalizedRows = await pool!.query(
+      `SELECT id, email
+       FROM stack_atlas.users
+       WHERE id = ANY($1::uuid[])`,
+      [[upperId, whitespaceId, collisionId]],
+    );
+    expect(normalizedRows.rows).toEqual(
+      expect.arrayContaining([
+        { id: upperId, email: `upper-${upperId}@example.test` },
+        { id: whitespaceId, email: `space-${whitespaceId}@example.test` },
+        { id: collisionId, email: `collision-${collisionId}@example.test` },
+      ]),
+    );
+
+    await expect(
+      pool!.query(
+        `INSERT INTO stack_atlas.users (id, email, password_hash)
+         VALUES ($1, $2, $3)`,
+        [invalidWriteId, ` Invalid-${invalidWriteId}@Example.Test `, 'test-hash'],
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+
+    await pool!.query(
+      'DELETE FROM stack_atlas.users WHERE id = ANY($1::uuid[])',
+      [[upperId, whitespaceId, collisionId]],
+    );
+  });
+
   it('enforces normalized email and session ownership in PostgreSQL', async () => {
     const accountId = randomUUID();
     await pool!.query(

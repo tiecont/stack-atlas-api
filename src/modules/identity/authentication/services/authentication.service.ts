@@ -4,7 +4,7 @@ import type { Response } from 'express';
 import { getApplicationConfig } from '../../../../config/application-config';
 import type { ApplicationConfig } from '../../../../config/application-config';
 import { AccountService } from '../../account/services/account.service';
-import type { Account } from '../../account/services/account.service';
+import type { Account } from '../../account/types/account.types';
 import { PasswordHasher } from '../../account/services/password-hasher.service';
 import { SessionService } from '../../session/services/session.service';
 import { LoginDto } from '../dto/authentication.dto';

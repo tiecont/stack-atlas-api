@@ -8,7 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
 import { getApplicationConfig } from '../../../../config/application-config';
 import { AccountService } from '../../account/services/account.service';
-import type { Account } from '../../account/services/account.service';
+import type { Account } from '../../account/types/account.types';
 import { SessionService } from '../../session/services/session.service';
 import { sessionTokenFromCookieHeader } from '../../session/helpers/session-token';
 import type { AuthenticatedPrincipal } from '../types/authenticated-principal';

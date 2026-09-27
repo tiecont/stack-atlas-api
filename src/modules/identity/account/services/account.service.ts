@@ -1,47 +1,15 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { QueryResultRow } from 'pg';
-import { DatabaseService } from '../../../../database/database.service';
+import type { CreateAccountDto } from '../dto/account.dto';
+import { AccountRepository } from '../repositories/account.repository';
+import type { Account, AccountCredentials } from '../types/account.types';
 import { PasswordHasher } from './password-hasher.service';
-import { CreateAccountDto } from '../dto/account.dto';
 
-interface AccountRow extends QueryResultRow {
-  id: string;
-  email: string;
-  created_at: Date | string;
-}
-
-interface CredentialAccountRow extends AccountRow {
-  password_hash: string;
-}
-
-export interface Account {
-  id: string;
-  email: string;
-  createdAt: string;
-}
-
-export interface AccountCredentials {
-  account: Account;
-  passwordHash: string;
-}
-
-export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-function toAccount(row: AccountRow): Account {
-  return {
-    id: row.id,
-    email: row.email,
-    createdAt: new Date(row.created_at).toISOString(),
-  };
-}
-
+/** Applies registration policy and coordinates account persistence. */
 @Injectable()
 export class AccountService {
   constructor(
-    private readonly database: DatabaseService,
+    private readonly accounts: AccountRepository,
     private readonly passwordHasher: PasswordHasher,
   ) {}
 
@@ -49,22 +17,9 @@ export class AccountService {
     const email = normalizeEmail(input.email);
     const passwordHash = await this.passwordHasher.hash(input.password);
     try {
-      const result = await this.database.query<AccountRow>(
-        `INSERT INTO stack_atlas.users (id, email, password_hash)
-         VALUES ($1, $2, $3)
-         RETURNING id, email, created_at`,
-        [randomUUID(), email, passwordHash],
-      );
-      return toAccount(result.rows[0]!);
+      return await this.accounts.create(randomUUID(), email, passwordHash);
     } catch (error) {
-      if (
-        typeof error === 'object' &&
-        error !== null &&
-        'code' in error &&
-        error.code === '23505' &&
-        'constraint' in error &&
-        error.constraint === 'users_email_key'
-      ) {
+      if (isEmailUniqueViolation(error)) {
         throw new ConflictException(
           'An account with this email already exists.',
         );
@@ -73,29 +28,28 @@ export class AccountService {
     }
   }
 
-  async findById(accountId: string): Promise<Account | null> {
-    const result = await this.database.query<AccountRow>(
-      `SELECT id, email, created_at
-       FROM stack_atlas.users
-       WHERE id = $1`,
-      [accountId],
-    );
-    const row = result.rows[0];
-    return row ? toAccount(row) : null;
+  findById(accountId: string): Promise<Account | null> {
+    return this.accounts.findById(accountId);
   }
 
-  async findForAuthentication(
-    email: string,
-  ): Promise<AccountCredentials | null> {
-    const result = await this.database.query<CredentialAccountRow>(
-      `SELECT id, email, created_at, password_hash
-       FROM stack_atlas.users
-       WHERE email = $1`,
-      [normalizeEmail(email)],
-    );
-    const row = result.rows[0];
-    return row
-      ? { account: toAccount(row), passwordHash: row.password_hash }
-      : null;
+  findForAuthentication(email: string): Promise<AccountCredentials | null> {
+    return this.accounts.findCredentialsByEmail(normalizeEmail(email));
   }
+}
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function isEmailUniqueViolation(
+  error: unknown,
+): error is { code: string; constraint: string } {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === '23505' &&
+    'constraint' in error &&
+    error.constraint === 'users_email_key'
+  );
 }

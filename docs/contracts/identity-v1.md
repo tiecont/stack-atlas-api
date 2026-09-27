@@ -31,6 +31,21 @@ details into client responses. Error responses use `Cache-Control: no-store`.
 The API also returns `no-store` for account registration, login, current-account,
 and logout responses.
 
+The server generates each request ID and does not adopt an arbitrary inbound
+request ID. The same generated UUID appears in `X-Request-Id` and the
+`requestId` Problem Details extension.
+
+## Feature ownership
+
+The public routes remain stable while implementation ownership follows the
+feature boundary: Account owns registration, password hashing, email policy,
+and account persistence; Session owns token creation, hashing, expiry, lookup,
+and revocation; Authentication owns login, logout, the authenticated principal,
+and `GET /account/me`. Controllers call feature services, services apply policy
+and call repositories, and repositories own SQL. The reusable exact-origin
+guard lives in common HTTP security and is shared by registration and
+authentication without a module cycle.
+
 ## Session cookie
 
 Successful login sets the configured cookie name (`stack_atlas_session` by
@@ -54,6 +69,9 @@ send credentials for cross-origin requests.
 The cookie policy assumes same-site Web/API deployment. A cross-site deployment
 requires an explicit CSRF design and a cookie-policy change before launch. The
 current policy does not claim to protect arbitrary cross-site deployments.
+When a browser sends `Origin`, registration, login, and logout require an exact
+configured-origin match; requests without an Origin header remain supported for
+non-browser clients.
 
 ## Security limitations
 
@@ -86,3 +104,8 @@ Deployed migrations are immutable. Apply additive API migrations before
 releasing any Web changes that depend on them. Protected learner-state features
 should use the authenticated principal and must not accept a user ID from
 request data as ownership authority.
+
+The initial email-normalization migration first detects collisions under
+`lower(btrim(email))`. It fails with a clear message before updating any rows if
+collisions exist. Otherwise it normalizes legacy values and adds a check
+constraint, preserving the existing unique constraint.

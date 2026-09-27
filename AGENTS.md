@@ -139,6 +139,9 @@ Migrations:
 - migrations do not import runtime services;
 - important migrations require integration tests.
 
+Do not set a global PostgreSQL statement timeout without a measured workload
+requirement. If one is needed, expose and validate it through typed config.
+
 ## 5. Auth/authorization
 
 Authentication establishes identity.
@@ -389,6 +392,12 @@ Choose names from the business feature (`identity/account`,
 Keep composition modules small and do not add pass-through abstractions that
 have no policy, lifecycle, or substitution value.
 
+Identity v1 ownership is explicit: AccountModule owns registration and the
+account repository; SessionModule owns session persistence and lifecycle;
+AuthenticationModule owns login, logout, the authenticated principal, and the
+current-account route. Reusable origin enforcement belongs in
+common/http/security/ and must not create a feature-module cycle.
+
 ## 20. Coding and API contract rules
 
 - Use strict TypeScript types. Do not add `any`, `@ts-ignore`, or unchecked
@@ -414,6 +423,9 @@ have no policy, lifecycle, or substitution value.
 
 `Dockerfile` has named `development` and `production` targets. Intermediate
 dependency/build stages are implementation details of those targets.
+
+Liveness is `/api/v1/health` and must not depend on PostgreSQL; readiness is
+`/api/v1/health/ready` and performs a database query.
 
 `compose.yaml` is for local development only. It must select the `development`
 target, provide PostgreSQL for local use, bind-mount the source, use a named
@@ -475,3 +487,16 @@ When verifying local Compose, inspect the resolved project name and published
 ports first. If a local port is occupied, override only the host port; do not
 stop or recreate another repository's containers. Report checks that could
 not run and their concrete environmental reason.
+
+## 24. Pre-commit checks
+
+Install Husky hooks through the package `prepare` script. The `pre-commit` hook
+must run `lint-staged` and `npm run test:precommit`, and fail the commit if
+either step fails. `lint-staged` applies ESLint autofix and Prettier to staged
+TypeScript files only.
+
+`test:precommit` runs typecheck, repository lint, unit tests, and build. Keep
+PostgreSQL integration and HTTP end-to-end tests in CI; they require a
+disposable PostgreSQL service and should not make ordinary commits depend on a
+running local database. Husky installation must be skipped in production
+dependency installs.
