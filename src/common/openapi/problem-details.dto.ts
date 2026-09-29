@@ -15,4 +15,7 @@ export class ProblemDetailsDto {
 
   @ApiProperty({ example: '/api/v1/resource' })
   instance!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  requestId!: string;
 }

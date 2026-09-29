@@ -24,9 +24,43 @@ src/
   config/
   database/
   modules/
+    health/
+      controllers/
+      services/
     identity/
-      authentication/
       account/
+        controllers/
+        services/
+        repositories/
+        entities/
+        dto/
+        guards/
+        helpers/
+        errors/
+        constants/
+        types/
+      authentication/
+        controllers/
+        services/
+        repositories/
+        entities/
+        dto/
+        guards/
+        helpers/
+        errors/
+        constants/
+        types/
+      session/
+        controllers/
+        services/
+        repositories/
+        entities/
+        dto/
+        guards/
+        helpers/
+        errors/
+        constants/
+        types/
     learning/
       enrollment/
       progress/
@@ -52,6 +86,24 @@ only when their roadmap phase starts.
 Business files MUST belong to a named feature.
 
 Do not create module-root technical dumping grounds.
+
+Each feature folder is its own bounded code owner. Keep its module/composition
+file at the feature root and place implementation under layer folders such as
+`controllers/`, `services/`, `repositories/`, `entities/`, `dto/`, `guards/`,
+`helpers/`, `errors/`, `constants/`, and `types/` as needed. Create only folders
+that contain real feature code. A bounded context root may contain only its
+composition module and named feature folders; shared transport or persistence
+mechanics belong in `common/` or `database/` only when they are truly cross-cutting.
+
+Keep behavioral tests under their feature path in `test/` (`test/<context>/<feature>/`;
+top-level platform features such as Health use `test/health/`). Keep migrations
+under `database/migrations/<context>/<feature>/`. Keep existing root
+migrations in place as deployed history. Migration runners must discover both
+legacy root files and nested feature files. New migration names must come from
+the migration generator and preserve chronological ordering with the existing
+14-digit UTC root migrations. Create them with
+`npm run migration:create -- <context> <feature> <name>`. Do not move, rename,
+or edit a deployed migration.
 
 ## 3. Source of truth
 
@@ -86,6 +138,9 @@ Migrations:
 - destructive evolution follows expand -> backfill -> verify -> contract;
 - migrations do not import runtime services;
 - important migrations require integration tests.
+
+Do not set a global PostgreSQL statement timeout without a measured workload
+requirement. If one is needed, expose and validate it through typed config.
 
 ## 5. Auth/authorization
 
@@ -311,3 +366,137 @@ Tests/commands
 Integration dependency
 Remaining risks
 ```
+
+## 19. Feature structure and dependency direction
+
+Follow this dependency direction:
+
+```text
+HTTP controller -> application service -> feature repository -> Database
+```
+
+Controllers validate/translate HTTP input and call a use case; they do not own
+business decisions or SQL. Services implement one feature's use cases and
+policy. Repositories own feature-specific SQL and persistence mapping. Keep SQL
+out of controllers and avoid generic repository/base-service frameworks.
+
+Cross-feature calls must use an explicit exported provider or a small stable
+feature contract. Do not introduce cycles, import another feature's private
+files, or make Account depend on Authentication. `common/` is not a place for
+feature code: promote code there only when multiple bounded contexts use the
+same behavior and ownership is genuinely shared.
+
+Choose names from the business feature (`identity/account`,
+`learning/progress`, `execution/outbox`). Avoid duplicate paths such as
+`health/health/` and module-root folders named only after technical concerns.
+Keep composition modules small and do not add pass-through abstractions that
+have no policy, lifecycle, or substitution value.
+
+Identity v1 ownership is explicit: AccountModule owns registration and the
+account repository; SessionModule owns session persistence and lifecycle;
+AuthenticationModule owns login, logout, the authenticated principal, and the
+current-account route. Reusable origin enforcement belongs in
+common/http/security/ and must not create a feature-module cycle.
+
+## 20. Coding and API contract rules
+
+- Use strict TypeScript types. Do not add `any`, `@ts-ignore`, or unchecked
+  casts to bypass a contract; narrow external input at the boundary.
+- Use `import type` for type-only dependencies and do not read `process.env`
+  outside configuration parsing, application bootstrap, or isolated tests.
+- Validate request DTOs explicitly, reject unknown fields, and document the
+  actual response/error shape in OpenAPI. Map persistence errors at the owning
+  feature boundary; never return raw SQL or driver errors.
+- Return explicit public representations. Do not serialize database rows,
+  password hashes, session token hashes, or internal security metadata.
+- Keep methods focused on one use case. Avoid controller business logic,
+  god services, speculative event buses, magic decorators, and duplicated
+  session/authentication logic.
+- Add comments or JSDoc to public behavior-bearing APIs when they clarify
+  security, lifecycle, or business semantics. Do not add comments that merely
+  restate the code.
+- Never log passwords, raw session credentials, learner source, or other
+  sensitive payloads. Unexpected errors must be normalized by the shared HTTP
+  error contract.
+
+## 21. Docker development and production
+
+`Dockerfile` has named `development` and `production` targets. Intermediate
+dependency/build stages are implementation details of those targets.
+
+Liveness is `/api/v1/health` and must not depend on PostgreSQL; readiness is
+`/api/v1/health/ready` and performs a database query.
+
+`compose.yaml` is for local development only. It must select the `development`
+target, provide PostgreSQL for local use, bind-mount the source, use a named
+`node_modules` volume, and pass the host UID/GID so generated files stay owned by
+the developer. It must not define production deployment behavior or make
+Kafka, Redis, Engine, mail, or other inactive infrastructure a startup
+dependency.
+
+Always set an explicit `stack-atlas-api` Compose project/resource namespace.
+Repositories with the same directory basename can otherwise collide on a
+default project name. Preserve the namespaced project, containers, network, and
+volumes. Never remove volumes or run `docker compose down -v` as part of normal
+verification.
+
+The production image must be reproducible from the lockfile, contain compiled
+application output and the runtime migration files/tooling, run as a fixed
+non-root user, and contain no development bind mounts or local secrets. Apply
+migrations as an explicit deployment/release step; do not hide destructive
+migration behavior in container startup. Keep `.dockerignore` aligned with
+production build needs while including required migration assets.
+
+## 22. CI and image publishing
+
+The canonical CI workflow must run dependency installation from the lockfile,
+build, typecheck, lint, unit tests, PostgreSQL-backed migration/integration
+tests, and HTTP end-to-end tests. Database tests must use a real PostgreSQL
+service and verify migrations from an empty database. Do not substitute SQL
+mocks for database invariants.
+
+Pull requests build the production Docker target without publishing it. Image
+publishing is gated on the full CI job and is limited to the configured
+`main`, `develop`, and version-tag triggers. Grant package-write permission
+only to the publishing job. Do not configure a deployment environment or
+credentials until a concrete deployment target is part of the task.
+
+Keep CI workflows and image tags consistent with package identity
+`stack-atlas-api`. Do not add a Kafka/Redis service to CI unless an active
+feature has an integration contract that requires it. Local Compose remains
+development-only; CI and release builds use the production Docker target.
+
+## 23. Verification for platform and delivery changes
+
+For Docker/CI/migration-runner changes, run the repository-equivalent checks:
+
+```bash
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run migrate
+npm run test:integration
+npm run test:e2e
+npm run build
+docker compose config --quiet
+docker build --target production .
+```
+
+When verifying local Compose, inspect the resolved project name and published
+ports first. If a local port is occupied, override only the host port; do not
+stop or recreate another repository's containers. Report checks that could
+not run and their concrete environmental reason.
+
+## 24. Pre-commit checks
+
+Install Husky hooks through the package `prepare` script. The `pre-commit` hook
+must run `lint-staged` and `npm run test:precommit`, and fail the commit if
+either step fails. `lint-staged` applies ESLint autofix and Prettier to staged
+TypeScript files only.
+
+`test:precommit` runs typecheck, repository lint, unit tests, and build. Keep
+PostgreSQL integration and HTTP end-to-end tests in CI; they require a
+disposable PostgreSQL service and should not make ordinary commits depend on a
+running local database. Husky installation must be skipped in production
+dependency installs.

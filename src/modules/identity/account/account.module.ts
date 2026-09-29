@@ -1,12 +1,15 @@
 import { Module } from '@nestjs/common';
+import { HttpSecurityModule } from '../../../common/http/security/http-security.module';
 import { DatabaseModule } from '../../../database/database.module';
-import { AuthenticationModule } from '../authentication/authentication.module';
-import { AccountController } from './account.controller';
-import { AccountService } from './account.service';
+import { AccountController } from './controllers/account.controller';
+import { AccountRepository } from './repositories/account.repository';
+import { AccountService } from './services/account.service';
+import { PasswordHasher } from './services/password-hasher.service';
 
 @Module({
-  imports: [DatabaseModule, AuthenticationModule],
+  imports: [DatabaseModule, HttpSecurityModule],
   controllers: [AccountController],
-  providers: [AccountService],
+  providers: [AccountRepository, AccountService, PasswordHasher],
+  exports: [AccountService, PasswordHasher],
 })
 export class AccountModule {}
