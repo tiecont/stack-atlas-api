@@ -151,6 +151,13 @@ Test unauthenticated, forbidden, wrong-owner, and revoked-access cases that
 apply to the endpoint. Never expose passwords, token values/hashes, or internal
 security metadata.
 
+Platform administration uses only the typed permission vocabulary and
+platform-owned roles. Resolve grants from PostgreSQL on each protected request;
+never authorize from request-body identity, email, UUID constants, or frontend
+state. SessionAuthGuard must run before PermissionGuard. Role grants/revokes
+require the explicit `platform:authorization` operator command; account
+registration or first login MUST NOT auto-promote an account.
+
 ### LEARN-001 — Evidence is not mastery
 
 Keep `read`, `checkpoint passed`, `practiced`, `applied`, and `verified later`
