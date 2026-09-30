@@ -29,6 +29,7 @@
     "migration:preflight:data": "node scripts/migrations/runner.mjs preflight data-up",
     "migration:check-timestamps": "node scripts/migrations/check-timestamps.mjs",
     "migration:verify": "node scripts/migrations/verify.mjs",
+    "platform:authorization": "node scripts/identity/platform-authorization-admin.mjs",
     "prepare": "node -e \"if (process.env.NODE_ENV !== 'production') require('child_process').execFileSync('husky', { stdio: 'inherit' })\""
   },
   "dependencies": {

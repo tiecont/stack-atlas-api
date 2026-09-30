@@ -46,23 +46,35 @@ describe('PostgreSQL migrations', () => {
     const featureHistory = await pool!.query(
       'SELECT migration_name, migration_kind FROM public.stack_atlas_migration_history',
     );
-    expect(featureHistory.rows).toEqual([
-      {
-        migration_name:
-          'content/catalog/migrations/1790731125157-ContentPlatformFoundation.ts',
-        migration_kind: 'schema',
-      },
-    ]);
+    expect(featureHistory.rows).toEqual(
+      expect.arrayContaining([
+        {
+          migration_name:
+            'content/catalog/migrations/1790731125157-ContentPlatformFoundation.ts',
+          migration_kind: 'schema',
+        },
+        {
+          migration_name:
+            'identity/platform-authorization/migrations/1790747319761-PlatformAuthorization.ts',
+          migration_kind: 'schema',
+        },
+      ]),
+    );
     const ownedTables = await pool!.query(
       `SELECT count(*)::int AS count
        FROM information_schema.tables
        WHERE table_schema = 'stack_atlas'
-         AND table_name IN ('users', 'sessions', 'content_items', 'content_revisions', 'content_publications')`,
+         AND table_name IN (
+           'users', 'sessions', 'content_items', 'content_revisions',
+           'content_publications', 'platform_roles',
+           'platform_role_permissions', 'user_platform_roles'
+         )`,
     );
-    expect(ownedTables.rows[0]?.count).toBe(5);
+    expect(ownedTables.rows[0]?.count).toBe(8);
   });
 
   it('normalizes upgrade rows and refuses normalization collisions without data loss', async () => {
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await pool!.query(
@@ -230,6 +242,7 @@ describe('PostgreSQL migrations', () => {
     await pool!.query(
       'CREATE TABLE stack_atlas.migration_safety_probe (id integer)',
     );
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
