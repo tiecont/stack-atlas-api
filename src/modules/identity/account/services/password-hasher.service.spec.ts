@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PasswordHasher } from '../../../src/modules/identity/account/services/password-hasher.service';
+import { PasswordHasher } from './password-hasher.service';
 
 describe('PasswordHasher', () => {
   it('stores an adaptive scrypt hash and verifies without exposing the password', async () => {

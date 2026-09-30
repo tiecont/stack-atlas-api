@@ -26,6 +26,8 @@ export function sessionTokenFromCookieHeader(
     .filter((part) => part.startsWith(prefix));
   if (matchingCookies.length !== 1) return null;
 
-  const token = matchingCookies[0]!.slice(prefix.length);
+  const matchingCookie = matchingCookies[0];
+  if (!matchingCookie) return null;
+  const token = matchingCookie.slice(prefix.length);
   return isSessionToken(token) ? token : null;
 }

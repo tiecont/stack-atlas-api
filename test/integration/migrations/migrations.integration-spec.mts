@@ -1,28 +1,20 @@
 import { Pool } from 'pg';
-import { runner } from 'node-pg-migrate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DatabaseService } from '../../src/database/database.service.js';
+import { DatabaseService } from '../../../src/database/database.service.js';
+import { migrate } from '../../../scripts/migrations/runner.mjs';
+import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
-const databaseUrl = process.env['DATABASE_TEST_URL'];
-const integration = describe.skipIf(!databaseUrl);
+const databaseUrl = requirePostgresTestDatabaseUrl();
 let pool: Pool | undefined;
 
-integration('PostgreSQL migrations', () => {
-  const runMigrations = (direction: 'up' | 'down') =>
-    runner({
-      databaseUrl: databaseUrl!,
-      dir: resolve(process.cwd(), 'database/migrations/**/*.{js,cjs}'),
-      useGlob: true,
-      migrationsTable: 'pgmigrations',
-      direction,
-      verbose: false,
-    });
+describe('PostgreSQL migrations', () => {
+  const runMigrations = (direction: 'up' | 'down' | 'down-all') =>
+    migrate(direction, databaseUrl);
 
   beforeAll(async () => {
     await runMigrations('up');
-    pool = new Pool({ connectionString: databaseUrl! });
+    pool = new Pool({ connectionString: databaseUrl });
   });
 
   afterAll(async () => {
@@ -34,7 +26,9 @@ integration('PostgreSQL migrations', () => {
       "SELECT to_regnamespace('stack_atlas') AS schema_name",
     );
     const history = await pool!.query('SELECT name FROM pgmigrations');
-    const migrationNames = history.rows.map((row: { name: string }) => row.name);
+    const migrationNames = history.rows.map(
+      (row: { name: string }) => row.name,
+    );
 
     expect(schema.rows[0]?.schema_name).toBe('stack_atlas');
     expect(history.rowCount).toBe(3);
@@ -49,16 +43,27 @@ integration('PostgreSQL migrations', () => {
         /^\d{14}-\d{3}_identity-email-normalization$/.test(migrationName),
       ),
     ).toBe(true);
-    const identityTables = await pool!.query(
+    const featureHistory = await pool!.query(
+      'SELECT migration_name, migration_kind FROM public.stack_atlas_migration_history',
+    );
+    expect(featureHistory.rows).toEqual([
+      {
+        migration_name:
+          'content/catalog/migrations/1790731125157-ContentPlatformFoundation.ts',
+        migration_kind: 'schema',
+      },
+    ]);
+    const ownedTables = await pool!.query(
       `SELECT count(*)::int AS count
        FROM information_schema.tables
        WHERE table_schema = 'stack_atlas'
-         AND table_name IN ('users', 'sessions')`,
+         AND table_name IN ('users', 'sessions', 'content_items', 'content_revisions', 'content_publications')`,
     );
-    expect(identityTables.rows[0]?.count).toBe(2);
+    expect(ownedTables.rows[0]?.count).toBe(5);
   });
 
   it('normalizes upgrade rows and refuses normalization collisions without data loss', async () => {
+    await runMigrations('down');
     await runMigrations('down');
     await pool!.query(
       'ALTER TABLE stack_atlas.users DROP CONSTRAINT users_email_normalized',
@@ -110,7 +115,9 @@ integration('PostgreSQL migrations', () => {
       ]),
     );
 
-    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [conflictingId]);
+    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [
+      conflictingId,
+    ]);
     await runMigrations('up');
 
     const normalizedRows = await pool!.query(
@@ -131,7 +138,11 @@ integration('PostgreSQL migrations', () => {
       pool!.query(
         `INSERT INTO stack_atlas.users (id, email, password_hash)
          VALUES ($1, $2, $3)`,
-        [invalidWriteId, ` Invalid-${invalidWriteId}@Example.Test `, 'test-hash'],
+        [
+          invalidWriteId,
+          ` Invalid-${invalidWriteId}@Example.Test `,
+          'test-hash',
+        ],
       ),
     ).rejects.toMatchObject({ code: '23514' });
 
@@ -164,7 +175,9 @@ integration('PostgreSQL migrations', () => {
         [randomUUID(), randomUUID(), 'a'.repeat(64)],
       ),
     ).rejects.toMatchObject({ code: '23503' });
-    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [accountId]);
+    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [
+      accountId,
+    ]);
   });
 
   it('commits and rolls back work through the shared transaction primitive', async () => {
@@ -175,7 +188,11 @@ integration('PostgreSQL migrations', () => {
         await client.query(
           `INSERT INTO stack_atlas.users (id, email, password_hash)
            VALUES ($1, $2, $3)`,
-          [rolledBackAccountId, `rollback-${rolledBackAccountId}@example.test`, 'test-hash'],
+          [
+            rolledBackAccountId,
+            `rollback-${rolledBackAccountId}@example.test`,
+            'test-hash',
+          ],
         );
         throw new Error('force transaction rollback');
       }),
@@ -192,7 +209,11 @@ integration('PostgreSQL migrations', () => {
       await client.query(
         `INSERT INTO stack_atlas.users (id, email, password_hash)
          VALUES ($1, $2, $3)`,
-        [committedAccountId, `commit-${committedAccountId}@example.test`, 'test-hash'],
+        [
+          committedAccountId,
+          `commit-${committedAccountId}@example.test`,
+          'test-hash',
+        ],
       );
     });
     const committed = await pool!.query(
@@ -200,11 +221,16 @@ integration('PostgreSQL migrations', () => {
       [committedAccountId],
     );
     expect(committed.rowCount).toBe(1);
-    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [committedAccountId]);
+    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [
+      committedAccountId,
+    ]);
   });
 
   it('refuses to roll back a foundation schema after it contains objects', async () => {
-    await pool!.query('CREATE TABLE stack_atlas.migration_safety_probe (id integer)');
+    await pool!.query(
+      'CREATE TABLE stack_atlas.migration_safety_probe (id integer)',
+    );
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await expect(runMigrations('down')).rejects.toThrow(

@@ -4,13 +4,13 @@ import { Pool } from 'pg';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { resolve } from 'node:path';
-import { configureHttp } from '../../../src/app.config';
-import { AppModule } from '../../../src/app.module';
-import { DATABASE_POOL } from '../../../src/database/database.constants';
+import { configureHttp } from '../../../src/app.config.js';
+import { AppModule } from '../../../src/app.module.js';
+import { DATABASE_POOL } from '../../../src/database/database.constants.js';
+import { migrate } from '../../../scripts/migrations/runner.mjs';
+import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
-const databaseUrl = process.env['DATABASE_TEST_URL'];
-const integration = describe.skipIf(!databaseUrl);
+const databaseUrl = requirePostgresTestDatabaseUrl();
 const allowedOrigin = 'https://learn.example';
 const invalidOrigin = 'https://attacker.example';
 
@@ -31,7 +31,7 @@ function publicProblem(
   return publicFields;
 }
 
-integration('identity account and session HTTP contract', () => {
+describe('identity account and session HTTP contract', () => {
   let app: INestApplication;
   let pool: Pool;
   const originalEnvironment = new Map<string, string | undefined>();
@@ -42,18 +42,11 @@ integration('identity account and session HTTP contract', () => {
 
   beforeAll(async () => {
     setEnvironment('NODE_ENV', 'test');
-    setEnvironment('DATABASE_URL', databaseUrl!);
+    setEnvironment('DATABASE_URL', databaseUrl);
     setEnvironment('CORS_ORIGINS', allowedOrigin);
-    const { runner } = await import('node-pg-migrate');
-    await runner({
-      databaseUrl: databaseUrl!,
-      dir: resolve(process.cwd(), 'database/migrations/**/*.{js,cjs}'),
-      useGlob: true,
-      migrationsTable: 'pgmigrations',
-      direction: 'up',
-      verbose: false,
-    });
-    pool = new Pool({ connectionString: databaseUrl! });
+    await migrate('up', databaseUrl);
+    await migrate('data-up', databaseUrl);
+    pool = new Pool({ connectionString: databaseUrl });
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(DATABASE_POOL)
       .useValue(pool)

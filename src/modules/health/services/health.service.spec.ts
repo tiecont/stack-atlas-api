@@ -1,8 +1,8 @@
 import { ServiceUnavailableException } from '@nestjs/common';
 import type { Pool } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
-import type { DatabaseService } from '../../src/database/database.service';
-import { HealthService } from '../../src/modules/health/services/health.service';
+import type { DatabaseService } from '../../../database/database.service';
+import { HealthService } from './health.service';
 
 describe('HealthService', () => {
   it('reports ready only after PostgreSQL answers a bounded probe query', async () => {

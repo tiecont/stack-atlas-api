@@ -1,6 +1,6 @@
 import type { Pool } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
-import { DatabaseService } from '../../src/database/database.service';
+import { DatabaseService } from './database.service';
 
 function createDatabase() {
   const client = {

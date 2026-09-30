@@ -1,502 +1,482 @@
 # Stack Atlas API — Agent Instructions
 
-Canonical agent contract for `stack-atlas-api`.
+Canonical execution rules for `stack-atlas-api`, the NestJS business and
+control-plane service. Read before planning, reviewing, or changing code. A
+closer `AGENTS.md` may add stricter rules but must not weaken these invariants.
 
-The API is a NestJS modular monolith and Stack Atlas business/control plane.
+**MUST / MUST NOT** are merge blockers. **SHOULD / SHOULD NOT** are defaults;
+a deviation needs a concrete repository-specific reason. Preserve unrelated
+user changes.
 
 ## 1. Mandatory pre-work
 
 Before editing:
-1. identify bounded context;
-2. identify named business feature;
-3. inspect implementation/tests;
-4. classify API, auth, migration, workflow, event, data, or integration change;
-5. define transaction/idempotency needs;
-6. define tests.
 
-Do not perform unrelated cleanup.
+1. Identify the bounded context and named feature that own the behavior.
+2. Inspect its module, service, repository, DTO, migration, and tests as
+   applicable; follow the nearest established feature pattern.
+3. Classify authorization, API, persistence, migration, lifecycle, event,
+   integration, or delivery risk.
+4. For authorization, write the actor, resolved context, resource owner, state,
+   and permission. For a query/schema change, record affected tables/columns,
+   nullability/defaults/constraints/indexes, existing-data impact, result
+   cardinality, and lock risk. For each write, state `Transaction: REQUIRED`
+   or `Transaction: NOT REQUIRED` with a reason. If required, name its entry
+   point, operations inside/outside, idempotency key, isolation/locking,
+   side-effect order, and rollback behavior.
+5. Identify the focused unit, PostgreSQL integration, contract, or HTTP test
+   that proves the changed invariant.
 
-## 2. Canonical architecture
+For non-trivial work, record current behavior, target behavior, invariant,
+owner, and objectively verifiable acceptance criteria before implementation.
+Do not perform unrelated cleanup or destructive broad resets.
 
-```text
-src/
-  common/
-  config/
-  database/
-  modules/
-    health/
-      controllers/
-      services/
-    identity/
-      account/
-        controllers/
-        services/
-        repositories/
-        entities/
-        dto/
-        guards/
-        helpers/
-        errors/
-        constants/
-        types/
-      authentication/
-        controllers/
-        services/
-        repositories/
-        entities/
-        dto/
-        guards/
-        helpers/
-        errors/
-        constants/
-        types/
-      session/
-        controllers/
-        services/
-        repositories/
-        entities/
-        dto/
-        guards/
-        helpers/
-        errors/
-        constants/
-        types/
-    learning/
-      enrollment/
-      progress/
-      bookmark/
-    assessment/
-      quiz/
-      mastery/
-    exercise/
-      catalog/
-    submission/
-      attempt/
-      history/
-    execution/
-      orchestration/
-      outbox/
-      result-consumer/
-    administration/
+## 2. Architecture rules
+
+### ARCH-001 — Feature owns business behavior
+
+Business files MUST belong to a named feature under
+`src/modules/<context>/<feature>/`. Keep the feature composition module at that
+root and implementation in only the layer directories that contain real code:
+`controllers/`, `services/`, `repositories/`, `entities/`, `dto/`, `guards/`,
+`helpers/`, `errors/`, `constants/`, or `types/`.
+
+Do not create technical layer folders directly under a bounded context, empty
+future features, duplicate paths such as `health/health/`, or module-root
+`services/` and `repositories/` directories. New bounded contexts require an
+active roadmap phase.
+
+Identity v1 ownership is fixed:
+
+- Account owns registration and account persistence.
+- Session owns session persistence and lifecycle.
+- Authentication owns login, logout, authenticated principal, and the
+  current-account route.
+- Account MUST NOT depend on Authentication.
+
+### ARCH-002 — Dependency direction
+
+Use `HTTP controller -> feature application service -> feature repository ->
+database`. Controllers validate/translate transport input and response only;
+services own one use case and its policy; repositories own feature SQL and
+persistence mapping. Keep SQL out of controllers and business policy out of
+repositories.
+
+Cross-feature calls MUST use an exported provider or a small stable feature
+contract. Do not import another feature's private files or create a cycle.
+Reusable origin enforcement belongs in `common/http/security/` and MUST NOT
+create a feature-module cycle.
+
+Each business command/use case has exactly one owning feature service. HTTP
+controllers, event consumers, and maintenance scripts are adapters: validate
+their boundary, resolve authority, then call that owner. They MUST NOT duplicate
+the transition or write repositories directly to bypass service policy.
+
+### ARCH-003 — Complex repeated behavior
+
+When a non-trivial business operation, resolution policy, or context-building
+step is needed by two or more features/services, extract it from the main use
+case services into one focused component such as `ResolverService` or
+`ContextService`.
+
+The extracted component MUST own the decision/resolution rules, define explicit
+inputs and outputs, and have focused behavioral tests. Callers delegate to it;
+they MUST NOT keep duplicate copies of the rules. Keep one-off logic local.
+Do not extract a pass-through wrapper, generic base service, or a component
+without a real second consumer. Keep domain behavior in its owning feature;
+move it to `common/` only when it is genuinely domain-neutral and shared.
+
+## 3. Data ownership and product phase
+
+### DATA-001 — PostgreSQL owns operational state
+
+PostgreSQL is the transactional source of truth for accounts, sessions,
+enrollments, progress, attempts, submissions, execution jobs, result
+application, and active administrative state. Add organizations, entitlements,
+or other future domains only when their roadmap phase starts.
+
+Redis MAY accelerate cache, counters, or fanout; it MUST NOT be the only durable
+record of progress, submissions, or entitlements. MongoDB is not a default
+store; adoption requires a documented workload and explicit ownership.
+
+### DATA-002 — Authored-content source
+
+Until an explicit authored-content cutover, Web Git remains canonical for
+article bodies, learning paths, exercise definitions, and assessment
+definitions. The API may establish content identity, immutable revisions,
+publication history, and validation as a persistence foundation. It MUST NOT
+dual-write authored content, expose learner reads, or make PostgreSQL the
+content source before that cutover.
+
+## 4. Authorization and learning invariants
+
+### AUTH-001 — Server-authoritative ownership
+
+Authentication establishes identity; authorization is decided by the server.
+Never accept a request user ID as ownership or an organization ID as authority.
+When immediate revocation matters, resolve account status and permissions from
+current database state rather than stale token claims.
+
+For every protected mutation, identify the principal, resolved context,
+resource owner, required lifecycle state, and permission before implementation.
+Test unauthenticated, forbidden, wrong-owner, and revoked-access cases that
+apply to the endpoint. Never expose passwords, token values/hashes, or internal
+security metadata.
+
+### LEARN-001 — Evidence is not mastery
+
+Keep `read`, `checkpoint passed`, `practiced`, `applied`, and `verified later`
+evidence distinct. A canonical article may occur in several learning paths.
+Persist progress against article identity; keep path-specific resume context
+separate. Reading MUST NOT imply mastery.
+
+## 5. Database and migration rules
+
+### MIG-001 — Timestamp identity — BLOCKER
+
+Before creating a migration, MUST run:
+
+```sh
+date +%s%3N
 ```
 
-Future modules such as `organization`, `entitlement`, `notification` are added
-only when their roadmap phase starts.
+Use that exact 13-digit Unix-millisecond value. If it already exists, rerun
+`date +%s%3N`; never alter the value by hand. The migration filename is
+`<timestamp>-<Description>.ts`; the class name is `<Description><timestamp>`
+and implements `MigrationInterface`.
 
-Business files MUST belong to a named feature.
+For example, the file/class pair must follow this shape:
 
-Do not create module-root technical dumping grounds.
+```text
+<timestamp>-AddAccountStatus.ts
+AddAccountStatus<timestamp> implements MigrationInterface
+```
 
-Each feature folder is its own bounded code owner. Keep its module/composition
-file at the feature root and place implementation under layer folders such as
-`controllers/`, `services/`, `repositories/`, `entities/`, `dto/`, `guards/`,
-`helpers/`, `errors/`, `constants/`, and `types/` as needed. Create only folders
-that contain real feature code. A bounded context root may contain only its
-composition module and named feature folders; shared transport or persistence
-mechanics belong in `common/` or `database/` only when they are truly cross-cutting.
+MUST NOT invent, round, copy, increment, or derive a timestamp from a release
+date. Do not use relative sequence numbers or rely on directory order. The
+timestamp is the creation identity.
 
-Keep behavioral tests under their feature path in `test/` (`test/<context>/<feature>/`;
-top-level platform features such as Health use `test/health/`). Keep migrations
-under `database/migrations/<context>/<feature>/`. Keep existing root
-migrations in place as deployed history. Migration runners must discover both
-legacy root files and nested feature files. New migration names must come from
-the migration generator and preserve chronological ordering with the existing
-14-digit UTC root migrations. Create them with
-`npm run migration:create -- <context> <feature> <name>`. Do not move, rename,
-or edit a deployed migration.
+### MIG-002 — Feature ownership
 
-## 3. Source of truth
+New migrations MUST live beside their owning feature:
 
-PostgreSQL/API owns:
-- users;
-- sessions;
-- enrollments;
-- progress;
-- attempts;
-- submissions;
-- execution jobs;
-- result application;
-- admin operational state;
-- organizations/entitlements later.
+```text
+src/modules/<context>/<feature>/migrations/
+```
 
-Git/content system remains canonical for:
-- article bodies;
-- learning paths;
-- exercise definitions;
-- assessment definitions.
+The feature is the owner whose persistence contract changes. Cross-feature
+schema changes still need one explicit owner. `src/database/migrations/` is not
+a valid location for new feature migrations.
 
-API may ingest/index metadata but must not become an accidental content CMS.
+Keep already deployed root migrations in place as history; do not move, rename,
+or edit them. The migration runner must support both this legacy history and
+new feature migration folders.
 
-## 4. Database rules
+### MIG-003 — Dual-history migration runner
 
-PostgreSQL is primary transactional store.
+The runner preserves deployed root `node-pg-migrate` history and applies new
+timestamped TypeScript migrations compiled under their owning feature. The
+legacy JavaScript files are immutable compatibility history; new migrations
+MUST use the feature-owned TypeScript format from MIG-001/MIG-002.
 
-Migrations:
-- use real generated timestamp identity;
-- append-only after deployment;
-- schema and data migrations are distinct;
-- destructive evolution follows expand -> backfill -> verify -> contract;
-- migrations do not import runtime services;
-- important migrations require integration tests.
+`npm run migration:create -- <context> <feature> <PascalCaseDescription>` is
+the supported generator. It creates a feature-owned schema migration and checks
+the generated timestamp for uniqueness. Do not create a new root legacy file or
+a TypeORM migration that this runner cannot execute.
+
+### MIG-004 — Schema migration vs data migration
+
+Schema changes belong in `<feature>/migrations/`. Business transformations
+and backfills belong in `<feature>/data-migrations/`. `npm run migrate` applies
+legacy and schema migrations only. Run `npm run migration:data-up` as an
+explicit release step after all legacy and schema migrations are applied;
+`npm run migration:preflight:data` checks that prerequisite without writing.
+Data migrations SHOULD be idempotent when practical and MUST have PostgreSQL
+integration coverage for important invariants. Seeds are only for
+reference/bootstrap data. Large or resumable backfills that need batching,
+progress reporting, or a dry run MUST use a dedicated `scripts/<context>/<feature>/`
+command instead of one long transaction in the migration runner.
+
+### MIG-005 — Destructive evolution
+
+Use:
+
+```text
+expand -> backfill/cutover -> verify -> contract -> cleanup
+```
+
+Do not drop legacy columns/tables while an older application version may still
+run. Contract migrations MUST verify prerequisites before tightening
+constraints. Backfills MUST check collisions/invalid rows before changing data
+and preserve rows if a precondition fails.
+
+### MIG-006 — Deterministic SQL and rollback
+
+Each migration MUST implement deliberate `up(queryRunner)` and
+`down(queryRunner)` behavior using migration-local SQL and metadata. Do not
+import Nest services, repositories, runtime configuration, or application
+providers into a migration. Keep each migration scoped to one persistence
+change and preserve valid account, authorization, and lifecycle state unless
+that change is the migration's explicit purpose.
+
+Once a migration reaches a shared or deployed environment, do not edit, rename,
+reorder, or reuse its identity. Add a new migration. An unshared branch
+migration may be corrected before merge; update its filename, class, tests, and
+references together.
 
 Do not set a global PostgreSQL statement timeout without a measured workload
-requirement. If one is needed, expose and validate it through typed config.
+need and validated typed configuration.
 
-## 5. Auth/authorization
+### MIG-007 — Required verification
 
-Authentication establishes identity.
+Every migration change MUST pass and CI MUST run:
 
-Authorization is server-authoritative.
-
-Never trust:
-- request user ID as ownership;
-- organization ID as authority;
-- stale token claims when immediate revocation matters.
-
-Do not leak:
-- passwords;
-- tokens;
-- internal security metadata.
-
-## 6. Learning invariants
-
-Reading != mastery.
-
-Evidence tiers remain distinct:
-- read;
-- checkpoint passed;
-- practiced;
-- applied;
-- verified later.
-
-A canonical article may exist in many learning paths.
-
-Progress semantics must preserve article identity while resume context can be
-path-specific.
-
-## 7. Submission invariants
-
-Submission references immutable exercise version.
-
-Initial state machine:
-
-```text
-DRAFT
--> QUEUED
--> RUNNING
--> PASSED
- | FAILED
- | COMPILE_ERROR
- | RUNTIME_ERROR
- | TIMEOUT
- | SYSTEM_ERROR
+```sh
+npm run migration:check-timestamps
+npm run migration:verify
+npm run test:integration
 ```
 
-Invalid transitions fail.
+`migration:verify` MUST apply legacy migrations, schema migrations, and then
+data migrations to an empty PostgreSQL database; it MUST verify applied counts
+by kind and roll all three groups back in a disposable database. CI MUST run
+this verifier, timestamp validation, PostgreSQL integration tests, and HTTP
+e2e tests. PostgreSQL test suites MUST use separate databases for destructive
+migration/integration work and HTTP e2e work. The disposable migration verifier
+and test-database creator MUST refuse non-local PostgreSQL hosts.
+Feature migration tests MUST verify schema constraints and data invariants;
+important backfills must verify failure-without-data-loss on invalid input.
+Never substitute SQL mocks for PostgreSQL migration invariants. Report the
+exact command and environmental reason when a required PostgreSQL check cannot
+run. A required database suite MUST fail when its URL or destructive-test
+opt-in is missing; it MUST NOT be silently skipped. PostgreSQL tests MUST
+refuse non-local hosts and database names outside the explicit Stack Atlas test
+database allowlist.
 
-Submission creation supports idempotency for client retries.
+## 6. API and error contracts
 
-API never executes learner code.
+### API-001 — Validate the boundary
 
-## 8. Kafka and outbox
+DTOs MUST validate applicable UUIDs/IDs, enums, string lengths, numeric bounds,
+array size, uniqueness, and filter/sort allowlists. Reject unknown request
+fields. Never accept raw SQL fragments or client-supplied ownership as
+convenience input.
 
-Execution uses asynchronous delivery.
+### API-002 — Explicit wire representation
 
-Required submission pattern:
+Use feature DTOs for responses. Do not serialize database rows or ORM entities
+when they contain password hashes, token hashes, internal ownership, audit, or
+security fields. Keep OpenAPI aligned with the actual success and Problem
+Details error shape. Map PostgreSQL/driver failures at the owning feature
+boundary; never return raw SQL or driver messages.
+
+Use strict TypeScript, `import type` for type-only imports, and narrow external
+input at the boundary. Do not add `any`, `@ts-ignore`, unchecked casts, or
+`process.env` reads outside configuration parsing, application bootstrap, and
+isolated tests. Use `unknown` for untrusted values, narrow them explicitly,
+and handle unions exhaustively. Public services/helpers need explicit return
+types; avoid non-null assertions unless the invariant is proven locally.
+
+For every new failure branch, define its condition, stable Problem Details
+code/type, HTTP status, public message, retryability, and transaction outcome.
+Unexpected errors use the shared Problem Details contract; never return raw
+database messages.
+
+## 7. Submission and event rules
+
+### EXEC-001 — Atomic idempotent submission creation
+
+A submission references an immutable exercise version and supports a client
+idempotency key. In one PostgreSQL transaction, persist the submission,
+execution job, and outbox event; commit all three or none. Do not use a direct
+DB insert followed by Kafka publish as the consistency mechanism.
+
+### EXEC-002 — Valid state transitions
+
+Allow only `DRAFT -> QUEUED -> RUNNING ->` one of `PASSED`, `FAILED`,
+`COMPILE_ERROR`, `RUNTIME_ERROR`, `TIMEOUT`, or `SYSTEM_ERROR`. Reject invalid
+and stale terminal transitions. The API never executes learner code.
+
+### EXEC-003 — Versioned at-least-once events
+
+Publish `execution.requested.v1` from the outbox. Use the API-owned shared
+envelope fields: `event_id`, `event_type`, `schema_version`, `occurred_at`,
+`correlation_id`, optional `causation_id`/`traceparent`, `producer`, and `data`.
+Never put secrets or learner credentials in events.
+
+Assume at-least-once delivery. Result consumers validate version/schema,
+deduplicate by event identity, and preserve submission/execution/trace IDs.
+The API owns result application; Engine MUST NOT mutate progress.
+
+### EXEC-004 — Transactional result application
+
+For a result event, validate the contract before mutation, deduplicate it, and
+reject stale terminal updates. In one transaction, apply the valid submission
+and attempt transition. Update learning/mastery only after that durable
+transition succeeds. Duplicate or stale results MUST NOT produce duplicate
+learning evidence.
+
+## 8. Tests and change checklists
+
+### TEST-001 — Required service sidecars and shared flow tests
+
+Every production `*.service.ts` file MUST have one adjacent
+`<service-name>.service.spec.ts` containing focused behavior tests for that
+service. The normal `npm test` command MUST discover these sidecars, and
+`npm run test:structure` MUST fail when a service sidecar is missing.
+Sidecars are unit tests for the owning service; they do not replace tests of
+database or HTTP invariants.
+
+These service unit sidecars are the only tests allowed under `src/`.
+
+Business-flow, PostgreSQL integration, contract, acceptance, and HTTP e2e tests
+MUST live in the shared `test/<context>/<feature>/` tree, grouped by feature.
+Cross-feature PostgreSQL migration/infrastructure tests belong in
+`test/integration/`; cross-feature HTTP contract tests may live in
+`test/http/`. Never put full-flow, integration, or e2e tests under
+`src/modules/<context>/<feature>/`. Do not create a parallel top-level `tests/`
+directory or tests whose only assertion is that a file imports or a provider
+exists.
+
+Every bug fix MUST have a regression test at the narrowest boundary that
+reproduces it. Each test states setup, action, and observable result. Database
+invariants use PostgreSQL rather than a mock of the behavior under test.
+
+### TEST-002 — Required flow coverage
+
+Cover relevant happy path, invalid input, authentication/authorization denial,
+wrong ownership, invalid lifecycle transition, idempotency/duplicate delivery,
+and rollback/atomicity. Critical auth, progress/quiz, submission, and result
+application changes SHOULD include HTTP/module or PostgreSQL-backed flow tests;
+unit mocks do not replace a database invariant test.
+
+Each business flow MUST have shared feature tests that cover its relevant happy
+path and failure cases. Name HTTP/API contract tests and browser acceptance
+tests according to the boundary they exercise; rendering a login page alone
+does not count as testing registration or authentication. Cross-repository
+browser-to-API acceptance tests belong in a dedicated integration gate once
+the API, Web, and required contract are available; ordinary API tests MUST NOT
+depend on sibling checkouts.
+
+API unit/e2e development MUST use deterministic event fixtures or fakes and
+must not require an Engine checkout. When a shared execution contract exists,
+store API-owned fixtures under `test/fixtures/` and use them in contract tests.
+
+### Change checklist — Authorization
+
+Before coding, record:
 
 ```text
-BEGIN
-  INSERT submission
-  INSERT execution_job
-  INSERT outbox_event
-COMMIT
+principal -> resolved context -> resource owner -> lifecycle state -> permission
 ```
 
-Outbox publisher sends `execution.requested.v1`.
+Before completion, verify server-derived ownership, current-state revocation,
+wrong-owner denial, and no sensitive response/log fields.
 
-Do not use direct DB insert + Kafka send as the only consistency model.
+### Change checklist — API contract
 
-Assume at-least-once delivery.
+Before completion, verify DTO validation and unknown-field behavior, explicit
+response DTO, Problem Details mapping, OpenAPI, and HTTP coverage for the
+changed contract.
 
-Result consumer must be idempotent.
+### Change checklist — Workflow/event
 
-## 9. Event contract
+Before completion, verify allowed source/target states, actor/context,
+authorization, transaction boundary, idempotency behavior, duplicate/stale
+event handling, and failure classification.
 
-Use shared integration contract.
+## 9. Observability and sensitive data
 
-Event envelope carries:
-- event_id;
-- event_type;
-- schema_version;
-- occurred_at;
-- correlation_id;
-- causation_id where applicable;
-- traceparent where applicable;
-- producer;
-- data.
+Propagate request ID, correlation ID, submission ID, execution ID, and trace
+context. Measure request/error/latency, auth failures, outbox backlog, Kafka
+publish failures, submission creation, and result-consumer failures. Never log
+passwords, raw session credentials, tokens, learner source, or other sensitive
+payloads by default.
 
-Never place secrets in Kafka messages.
+## 10. Docker, CI, and commits
 
-## 10. Result application
+### CMD-001 — Command ownership
 
-Engine publishes result.
+`package.json` is the public command registry. Run documented repository
+scripts (`npm run ...`); do not bypass them with direct Nest, migration, or
+database CLI invocations. Every new script MUST have one owning concern, typed
+or validated arguments, documented read/write side effects, deterministic exit
+status, and tests for destructive or data-changing behavior. Put feature
+maintenance code under `scripts/<context>/<feature>/`; put shared tooling under
+`scripts/` only when it serves multiple contexts. Keep preflight/audit commands
+read-only and separate from apply/repair commands.
 
-API owns business transition.
+For data-changing commands, specify the target scope, preflight checks,
+idempotency, dry-run or audit mode, confirmation requirements, partial-failure
+behavior, and rollback/recovery procedure. Never make a build, test, or
+application startup command perform a backfill or repair implicitly.
 
-Consumer must:
-- validate contract;
-- deduplicate;
-- reject stale terminal updates;
-- transactionally update submission/attempt;
-- update learning/mastery only after valid durable transition.
+Use `migration:create` only through the feature-aware package script described
+in MIG-003. `migrate` applies legacy and schema migrations; data migrations
+require the explicit `migration:data-up` command after its preflight succeeds.
 
-Engine must never mutate learner progress.
+Compose is local development only. Keep the explicit project name
+`stack-atlas-api`, development target, PostgreSQL, source bind mount, named
+`node_modules`, host UID/GID, and namespaced containers/network/volumes. Check
+resolved project and host ports before Compose verification; override only an
+occupied host port. Never stop another repository's containers or run
+`docker compose down -v` during normal verification. Inactive Kafka, Redis,
+Engine, and mail are not startup dependencies.
 
-## 11. MongoDB/Redis
+`/api/v1/health` is liveness and MUST NOT query PostgreSQL.
+`/api/v1/health/ready` is readiness and MUST query PostgreSQL.
 
-MongoDB is not default.
+The production target MUST build from the lockfile, include compiled output and
+runtime migration tooling, run as a fixed non-root user, and contain no local
+secrets or development mounts. Migrations run as an explicit release step, not
+at container startup. Release operators MUST follow
+`docs/operations/migrations.md`, use the immutable versioned image, run the
+read-only preflight before apply, preserve a verified backup/recovery path for
+destructive changes, and check readiness after rollout. Production rollback
+uses a forward migration or the documented incident recovery procedure; do not
+run `migration:down` as routine deployment recovery.
 
-Adoption requires documented workload and source-of-truth ownership.
+CI MUST run `npm ci`, build, typecheck, lint, unit tests and the test-placement
+gate, migration timestamp checks and disposable-database verification,
+PostgreSQL integration tests, and HTTP e2e tests. CI MUST create separate
+disposable integration and e2e databases and set
+`ALLOW_DESTRUCTIVE_TEST_DATABASE=true` only for those test jobs. Pull
+requests build the production Docker target without publishing. Publishing is
+gated on CI and limited to `main`, `develop`, and version-tag pushes. Keep image
+identity `stack-atlas-api`; package-write permission belongs only to the
+publishing job. Do not add Kafka/Redis CI services without an active contract
+or deployment credentials without a concrete deployment target.
 
-Redis may support cache/counters/fanout acceleration but must not be sole
-durable truth for progress/submissions/entitlements.
+Husky is installed through `prepare` and skipped in production installs. The
+pre-commit hook runs `lint-staged` and `npm run test:precommit`; either failure
+blocks the commit. `lint-staged` formats/lints staged TypeScript files only.
 
-## 12. API contracts
+GitHub branch protection MUST require the repository CI workflow and code-owner
+review for migration, API contract, and agent-rule changes. Those settings are
+repository-host controls and must be checked in GitHub. `.github/CODEOWNERS`
+names the repository owner. Local hooks and this file do not enforce required
+reviews or checks on their own.
 
-DTOs validate:
-- IDs;
-- enums;
-- lengths;
-- bounds;
-- collection size;
-- filter/sort allowlists.
+## 11. Verification gates
 
-Use explicit response contracts.
+Run checks relevant to the change and report only commands actually run:
 
-Keep OpenAPI aligned with implementation.
-
-Do not expose ORM entities accidentally.
-
-## 13. Testing
-
-Use:
-- unit tests for domain/policy logic;
-- repository integration tests;
-- HTTP e2e;
-- migration tests;
-- Kafka contract tests;
-- cross-repo execution integration tests.
-
-Critical flows:
-- auth;
-- progress;
-- quiz;
-- submission;
-- duplicate creation;
-- duplicate/stale execution result;
-- authorization denial.
-
-Every bug fix gets regression coverage.
-
-## 14. Observability
-
-Propagate:
-- request ID;
-- correlation ID;
-- submission ID;
-- execution ID;
-- trace context.
-
-Do not log learner source by default.
-
-Measure:
-- request/error/latency;
-- auth failures;
-- outbox backlog;
-- Kafka publishing failures;
-- submission creation;
-- result-consumer failures.
-
-## 15. Forbidden patterns
-
-MUST NOT:
-- execute user code;
-- mutate progress directly from Engine;
-- invent migration timestamps;
-- use Kafka/Redis as business source of truth;
-- add MongoDB without owned workload;
-- create BaseService/BaseRepository hierarchy;
-- hide cycles;
-- accept client ownership as authority.
-
-## 16. Independent development rule
-
-API must be testable without a live Engine.
-
-Use:
-- Kafka contract fixtures;
-- stub/fake consumer integration tests;
-- deterministic result event fixtures.
-
-Do not require Engine checkout for ordinary API unit/e2e development.
-
-## 17. Verification
-
-Repository-equivalent commands for:
-
-```bash
+```sh
+npm run typecheck
+npm run lint
+npm test
 npm run build
-npm run typecheck
-npm run lint
-npm test
-npm run test:e2e
-```
-
-Migration/event changes require corresponding verification.
-
-## 18. Completion report
-
-```text
-Summary
-Bounded context / feature
-Business invariants changed
-Database/migrations
-HTTP/event contracts
-Tests/commands
-Integration dependency
-Remaining risks
-```
-
-## 19. Feature structure and dependency direction
-
-Follow this dependency direction:
-
-```text
-HTTP controller -> application service -> feature repository -> Database
-```
-
-Controllers validate/translate HTTP input and call a use case; they do not own
-business decisions or SQL. Services implement one feature's use cases and
-policy. Repositories own feature-specific SQL and persistence mapping. Keep SQL
-out of controllers and avoid generic repository/base-service frameworks.
-
-Cross-feature calls must use an explicit exported provider or a small stable
-feature contract. Do not introduce cycles, import another feature's private
-files, or make Account depend on Authentication. `common/` is not a place for
-feature code: promote code there only when multiple bounded contexts use the
-same behavior and ownership is genuinely shared.
-
-Choose names from the business feature (`identity/account`,
-`learning/progress`, `execution/outbox`). Avoid duplicate paths such as
-`health/health/` and module-root folders named only after technical concerns.
-Keep composition modules small and do not add pass-through abstractions that
-have no policy, lifecycle, or substitution value.
-
-Identity v1 ownership is explicit: AccountModule owns registration and the
-account repository; SessionModule owns session persistence and lifecycle;
-AuthenticationModule owns login, logout, the authenticated principal, and the
-current-account route. Reusable origin enforcement belongs in
-common/http/security/ and must not create a feature-module cycle.
-
-## 20. Coding and API contract rules
-
-- Use strict TypeScript types. Do not add `any`, `@ts-ignore`, or unchecked
-  casts to bypass a contract; narrow external input at the boundary.
-- Use `import type` for type-only dependencies and do not read `process.env`
-  outside configuration parsing, application bootstrap, or isolated tests.
-- Validate request DTOs explicitly, reject unknown fields, and document the
-  actual response/error shape in OpenAPI. Map persistence errors at the owning
-  feature boundary; never return raw SQL or driver errors.
-- Return explicit public representations. Do not serialize database rows,
-  password hashes, session token hashes, or internal security metadata.
-- Keep methods focused on one use case. Avoid controller business logic,
-  god services, speculative event buses, magic decorators, and duplicated
-  session/authentication logic.
-- Add comments or JSDoc to public behavior-bearing APIs when they clarify
-  security, lifecycle, or business semantics. Do not add comments that merely
-  restate the code.
-- Never log passwords, raw session credentials, learner source, or other
-  sensitive payloads. Unexpected errors must be normalized by the shared HTTP
-  error contract.
-
-## 21. Docker development and production
-
-`Dockerfile` has named `development` and `production` targets. Intermediate
-dependency/build stages are implementation details of those targets.
-
-Liveness is `/api/v1/health` and must not depend on PostgreSQL; readiness is
-`/api/v1/health/ready` and performs a database query.
-
-`compose.yaml` is for local development only. It must select the `development`
-target, provide PostgreSQL for local use, bind-mount the source, use a named
-`node_modules` volume, and pass the host UID/GID so generated files stay owned by
-the developer. It must not define production deployment behavior or make
-Kafka, Redis, Engine, mail, or other inactive infrastructure a startup
-dependency.
-
-Always set an explicit `stack-atlas-api` Compose project/resource namespace.
-Repositories with the same directory basename can otherwise collide on a
-default project name. Preserve the namespaced project, containers, network, and
-volumes. Never remove volumes or run `docker compose down -v` as part of normal
-verification.
-
-The production image must be reproducible from the lockfile, contain compiled
-application output and the runtime migration files/tooling, run as a fixed
-non-root user, and contain no development bind mounts or local secrets. Apply
-migrations as an explicit deployment/release step; do not hide destructive
-migration behavior in container startup. Keep `.dockerignore` aligned with
-production build needs while including required migration assets.
-
-## 22. CI and image publishing
-
-The canonical CI workflow must run dependency installation from the lockfile,
-build, typecheck, lint, unit tests, PostgreSQL-backed migration/integration
-tests, and HTTP end-to-end tests. Database tests must use a real PostgreSQL
-service and verify migrations from an empty database. Do not substitute SQL
-mocks for database invariants.
-
-Pull requests build the production Docker target without publishing it. Image
-publishing is gated on the full CI job and is limited to the configured
-`main`, `develop`, and version-tag triggers. Grant package-write permission
-only to the publishing job. Do not configure a deployment environment or
-credentials until a concrete deployment target is part of the task.
-
-Keep CI workflows and image tags consistent with package identity
-`stack-atlas-api`. Do not add a Kafka/Redis service to CI unless an active
-feature has an integration contract that requires it. Local Compose remains
-development-only; CI and release builds use the production Docker target.
-
-## 23. Verification for platform and delivery changes
-
-For Docker/CI/migration-runner changes, run the repository-equivalent checks:
-
-```bash
-npm ci
-npm run typecheck
-npm run lint
-npm test
-npm run migrate
 npm run test:integration
 npm run test:e2e
-npm run build
-docker compose config --quiet
-docker build --target production .
 ```
 
-When verifying local Compose, inspect the resolved project name and published
-ports first. If a local port is occupied, override only the host port; do not
-stop or recreate another repository's containers. Report checks that could
-not run and their concrete environmental reason.
+Migration and event changes require the PostgreSQL/contract checks described
+above. Docker/CI changes also require resolved Compose config and a production
+target build. Report an unavailable check with its exact command and concrete
+environmental reason.
 
-## 24. Pre-commit checks
+## 12. Completion report
 
-Install Husky hooks through the package `prepare` script. The `pre-commit` hook
-must run `lint-staged` and `npm run test:precommit`, and fail the commit if
-either step fails. `lint-staged` applies ESLint autofix and Prettier to staged
-TypeScript files only.
-
-`test:precommit` runs typecheck, repository lint, unit tests, and build. Keep
-PostgreSQL integration and HTTP end-to-end tests in CI; they require a
-disposable PostgreSQL service and should not make ordinary commits depend on a
-running local database. Husky installation must be skipped in production
-dependency installs.
+Report summary, bounded context/feature, business invariant changed,
+database/migration and HTTP/event impact, tests/commands run, integration
+dependency, and remaining risks.

@@ -1,13 +1,12 @@
 import type { ApplicationConfig, NodeEnvironment } from './application-config';
 import { API_PREFIX } from '../common/http/http.constants';
 
-const ENVIRONMENTS = new Set<NodeEnvironment>([
-  'development',
-  'test',
-  'production',
-]);
 const MAX_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const DEFAULT_WEB_ORIGIN = 'http://localhost:3001';
+
+function isNodeEnvironment(value: string): value is NodeEnvironment {
+  return value === 'development' || value === 'test' || value === 'production';
+}
 
 function parseInteger(
   value: unknown,
@@ -70,10 +69,10 @@ export function validateEnvironment(
   values: Record<string, unknown>,
 ): Record<string, unknown> {
   const environment = String(values['NODE_ENV'] ?? 'development');
-  if (!ENVIRONMENTS.has(environment as NodeEnvironment)) {
+  if (!isNodeEnvironment(environment)) {
     throw new Error('NODE_ENV must be development, test, or production.');
   }
-  const nodeEnvironment = environment as NodeEnvironment;
+  const nodeEnvironment = environment;
 
   const databaseUrl = String(values['DATABASE_URL'] ?? '');
   let parsedDatabaseUrl: URL;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateEnvironment } from '../../src/config/environment';
+import { validateEnvironment } from '../../../src/config/environment';
 
 const validValues = {
   DATABASE_URL: 'postgresql://atlas:secret@localhost:5432/atlas',

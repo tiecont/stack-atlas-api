@@ -38,8 +38,10 @@ jobs:
           --health-retries=10
     env:
       NODE_ENV: test
-      DATABASE_URL: postgresql://stack_atlas:stack_atlas_local@127.0.0.1:5432/stack_atlas_test
-      DATABASE_TEST_URL: postgresql://stack_atlas:stack_atlas_local@127.0.0.1:5432/stack_atlas_test
+      DATABASE_URL: postgresql://stack_atlas:stack_atlas_local@127.0.0.1:5432/stack_atlas_integration_test
+      DATABASE_TEST_URL: postgresql://stack_atlas:stack_atlas_local@127.0.0.1:5432/stack_atlas_integration_test
+      DATABASE_VERIFY_ADMIN_URL: postgresql://stack_atlas:stack_atlas_local@127.0.0.1:5432/postgres
+      ALLOW_DESTRUCTIVE_TEST_DATABASE: 'true'
       DB_POOL_MAX: 4
       CORS_ORIGINS: https://learn.example
     steps:
@@ -55,8 +57,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Create isolated PostgreSQL test databases
+        run: npm run test:db:create
+
       - name: Build
         run: npm run build
+
+      - name: Check feature migration timestamps
+        run: npm run migration:check-timestamps
 
       - name: Typecheck
         run: npm run typecheck
@@ -67,6 +75,12 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Verify legacy, schema, and data migrations in a disposable database
+        run: npm run migration:verify
+
+      - name: Preflight the clean integration database
+        run: npm run migration:preflight
+
       - name: Apply migrations from an empty database
         run: npm run migrate
 
@@ -75,6 +89,9 @@ jobs:
 
       - name: HTTP end-to-end tests
         run: npm run test:e2e
+        env:
+          DATABASE_URL: postgresql://stack_atlas:stack_atlas_local@127.0.0.1:5432/stack_atlas_e2e_test
+          DATABASE_TEST_URL: postgresql://stack_atlas:stack_atlas_local@127.0.0.1:5432/stack_atlas_e2e_test
 
   docker-build:
     name: Validate production Docker image
