@@ -114,8 +114,27 @@ The API owns persisted Content Document V1. Its canonical contract is
 types; paragraphs, lists, and inline formatting belong in
 `rich_text.props.nodes`. Web mirrors the contract independently, and both
 repositories MUST keep their canonical JSON fixture semantically identical.
-Revision append MUST require the expected latest revision id and reject stale
-or competing writes while holding the content-item row lock.
+Revision append MUST require `baseRevisionId` and reject stale or competing
+writes while holding the content-item row lock.
+
+Treat `docs/contracts/content-v1.md` as the persisted schema authority. Keep
+validation exact-key at the document, block envelope, block props, rich-text,
+and inline-node levels. Block ids are required, unique within a document, and
+never generated in a repository. Block version is exactly `1`; unsupported
+types or versions fail validation. A heading's optional anchor is
+`props.anchor`, never its block id. Reject executable URL schemes, protocol-
+relative URLs, and URL credentials. Keep the documented document, block,
+depth, code-byte, table, related-item, and URL limits aligned with the
+independent Web validator. The API fixture is
+`test/fixtures/content/content-document-v1.json`; Web keeps its own copied
+fixture, and neither repository imports source or fixtures from the other.
+
+Contract tests MUST exercise the canonical all-block fixture, unknown fields
+and versions, duplicate ids, unsafe URLs, and size limits. Checksum tests MUST
+prove key-order-independent output. PostgreSQL integration coverage MUST prove
+stale-editor conflict with no extra revision and one-winner/one-conflict
+behavior for concurrent appends from the same base, including the latest
+pointer and revision count.
 
 ## 4. Authorization and learning invariants
 

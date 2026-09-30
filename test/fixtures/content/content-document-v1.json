@@ -48,10 +48,10 @@
       }
     },
     {
-      "id": "overview",
+      "id": "heading-overview",
       "type": "heading",
       "version": 1,
-      "props": { "level": 2, "id": "overview", "text": "Overview" }
+      "props": { "level": 2, "anchor": "overview", "text": "Overview" }
     },
     {
       "id": "example-code",

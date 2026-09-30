@@ -14,7 +14,7 @@ export type ContentBlockV1 =
   | ContentBlockEnvelopeV1<'rich_text', { nodes: RichTextNodeV1[] }>
   | ContentBlockEnvelopeV1<
       'heading',
-      { level: 2 | 3 | 4; text: string; id?: string }
+      { level: 2 | 3 | 4; anchor?: string; text: string }
     >
   | ContentBlockEnvelopeV1<'code', { language: string; code: string }>
   | ContentBlockEnvelopeV1<
@@ -60,6 +60,18 @@ const CONTENT_KEY_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,254}$/;
 const BLOCK_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
 const HEADING_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+export const CONTENT_DOCUMENT_LIMITS_V1 = Object.freeze({
+  maxDocumentBytes: 1_048_576,
+  maxBlocks: 500,
+  maxBlockIdLength: 128,
+  maxRichTextDepth: 16,
+  maxCodeBytes: 100_000,
+  maxTableColumns: 20,
+  maxTableRows: 100,
+  maxRelatedItems: 20,
+  maxUrlLength: 2048,
+});
+
 export function validateContentKey(contentKey: string): string {
   if (!CONTENT_KEY_PATTERN.test(contentKey)) {
     throw new ContentDocumentValidationError(
@@ -71,6 +83,7 @@ export function validateContentKey(contentKey: string): string {
 
 export function validateContentDocument(value: unknown): ContentDocumentV1 {
   const document = record(value, 'document');
+  assertDocumentSize(document);
   exactKeys(
     document,
     ['schema_version', 'title', 'description', 'blocks'],
@@ -88,7 +101,10 @@ export function validateContentDocument(value: unknown): ContentDocumentV1 {
     500,
   );
   const sourceBlocks = document['blocks'];
-  if (!Array.isArray(sourceBlocks) || sourceBlocks.length > 500) {
+  if (
+    !Array.isArray(sourceBlocks) ||
+    sourceBlocks.length > CONTENT_DOCUMENT_LIMITS_V1.maxBlocks
+  ) {
     throw new ContentDocumentValidationError(
       'document.blocks must be an array with at most 500 blocks.',
     );
@@ -112,7 +128,11 @@ export function validateContentDocument(value: unknown): ContentDocumentV1 {
 function validateBlock(value: unknown, path: string): ContentBlockV1 {
   const block = record(value, path);
   exactKeys(block, ['id', 'type', 'version', 'props'], path);
-  const id = boundedText(block['id'], `${path}.id`, 128);
+  const id = boundedText(
+    block['id'],
+    `${path}.id`,
+    CONTENT_DOCUMENT_LIMITS_V1.maxBlockIdLength,
+  );
   if (!BLOCK_ID_PATTERN.test(id)) {
     throw new ContentDocumentValidationError(
       `${path}.id must start with a lowercase letter or digit and contain only lowercase letters, digits, dots, underscores, colons, or hyphens.`,
@@ -135,22 +155,24 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
         },
       };
     case 'heading': {
-      exactKeys(props, ['level', 'text', 'id'], `${path}.props`, ['id']);
+      exactKeys(props, ['level', 'text', 'anchor'], `${path}.props`, [
+        'anchor',
+      ]);
       const level = props['level'];
       if (level !== 2 && level !== 3 && level !== 4) {
         throw new ContentDocumentValidationError(
           `${path}.props.level must be 2, 3, or 4.`,
         );
       }
-      const headingId = props['id'];
+      const anchor = props['anchor'];
       if (
-        headingId !== undefined &&
-        (typeof headingId !== 'string' ||
-          headingId.length > 120 ||
-          !HEADING_ID_PATTERN.test(headingId))
+        anchor !== undefined &&
+        (typeof anchor !== 'string' ||
+          anchor.length > 120 ||
+          !HEADING_ID_PATTERN.test(anchor))
       ) {
         throw new ContentDocumentValidationError(
-          `${path}.props.id must be a lowercase hyphenated heading ID.`,
+          `${path}.props.anchor must be a lowercase hyphenated heading anchor.`,
         );
       }
       return {
@@ -160,7 +182,7 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
         props: {
           level,
           text: boundedText(props['text'], `${path}.props.text`, 160),
-          ...(headingId === undefined ? {} : { id: headingId }),
+          ...(anchor === undefined ? {} : { anchor }),
         },
       };
     }
@@ -176,7 +198,12 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
             `${path}.props.language`,
             40,
           ),
-          code: boundedText(props['code'], `${path}.props.code`, 100_000, true),
+          code: boundedUtf8Text(
+            props['code'],
+            `${path}.props.code`,
+            CONTENT_DOCUMENT_LIMITS_V1.maxCodeBytes,
+            true,
+          ),
         },
       };
     case 'callout': {
@@ -209,7 +236,7 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
         type: 'image',
         version: 1,
         props: {
-          src: boundedText(props['src'], `${path}.props.src`, 2048),
+          src: safeImageSource(props['src'], `${path}.props.src`),
           alt: boundedText(props['alt'], `${path}.props.alt`, 1000, true),
           ...(caption === undefined
             ? {}
@@ -224,14 +251,14 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
       const headers = stringArray(
         props['headers'],
         `${path}.props.headers`,
-        20,
+        CONTENT_DOCUMENT_LIMITS_V1.maxTableColumns,
         500,
       );
       const rows = props['rows'];
       if (
         !Array.isArray(rows) ||
         rows.length === 0 ||
-        rows.length > 100 ||
+        rows.length > CONTENT_DOCUMENT_LIMITS_V1.maxTableRows ||
         !rows.every(
           (row) =>
             Array.isArray(row) &&
@@ -263,7 +290,11 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
     case 'related_content': {
       exactKeys(props, ['items'], `${path}.props`);
       const items = props['items'];
-      if (!Array.isArray(items) || items.length === 0 || items.length > 20) {
+      if (
+        !Array.isArray(items) ||
+        items.length === 0 ||
+        items.length > CONTENT_DOCUMENT_LIMITS_V1.maxRelatedItems
+      ) {
         throw new ContentDocumentValidationError(
           `${path}.props.items must contain 1 to 20 entries.`,
         );
@@ -282,7 +313,7 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
             const description = entry['description'];
             return {
               title: boundedText(entry['title'], `${itemPath}.title`, 160),
-              href: boundedText(entry['href'], `${itemPath}.href`, 2048),
+              href: safeHref(entry['href'], `${itemPath}.href`),
               ...(description === undefined
                 ? {}
                 : {
@@ -355,7 +386,7 @@ function validateInlineNodes(
       `${path} must contain 1 to 500 inline nodes.`,
     );
   }
-  if (depth > 16) {
+  if (depth > CONTENT_DOCUMENT_LIMITS_V1.maxRichTextDepth) {
     throw new ContentDocumentValidationError(`${path} is nested too deeply.`);
   }
   return value.map((item, index) => {
@@ -372,7 +403,7 @@ function validateInlineNodes(
       exactKeys(node, ['type', 'href', 'children'], itemPath);
       return {
         type: 'link',
-        href: boundedText(node['href'], `${itemPath}.href`, 2048),
+        href: safeHref(node['href'], `${itemPath}.href`),
         children: validateInlineNodes(
           node['children'],
           `${itemPath}.children`,
@@ -399,6 +430,115 @@ function validateInlineNodes(
       `${itemPath}.type is not supported.`,
     );
   });
+}
+
+function assertDocumentSize(value: Record<string, unknown>): void {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new ContentDocumentValidationError(
+      'document must be JSON serializable.',
+    );
+  }
+  if (serialized === undefined) {
+    throw new ContentDocumentValidationError(
+      'document must be JSON serializable.',
+    );
+  }
+  if (
+    Buffer.byteLength(serialized, 'utf8') >
+    CONTENT_DOCUMENT_LIMITS_V1.maxDocumentBytes
+  ) {
+    throw new ContentDocumentValidationError(
+      `document must not exceed ${CONTENT_DOCUMENT_LIMITS_V1.maxDocumentBytes} UTF-8 bytes.`,
+    );
+  }
+}
+
+function boundedUtf8Text(
+  value: unknown,
+  path: string,
+  maximumBytes: number,
+  allowEmpty = false,
+): string {
+  const text = boundedText(value, path, maximumBytes, allowEmpty);
+  if (Buffer.byteLength(text, 'utf8') > maximumBytes) {
+    throw new ContentDocumentValidationError(
+      `${path} must not exceed ${maximumBytes} UTF-8 bytes.`,
+    );
+  }
+  return text;
+}
+
+function safeHref(value: unknown, path: string): string {
+  const href = boundedText(
+    value,
+    path,
+    CONTENT_DOCUMENT_LIMITS_V1.maxUrlLength,
+  );
+  if (!isSafeHref(href)) {
+    throw new ContentDocumentValidationError(
+      `${path} must be a local path, fragment, or HTTP(S) URL without credentials.`,
+    );
+  }
+  return href;
+}
+
+function safeImageSource(value: unknown, path: string): string {
+  const src = boundedText(value, path, CONTENT_DOCUMENT_LIMITS_V1.maxUrlLength);
+  if (!isSafeLocalPath(src)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(src);
+    } catch {
+      throw new ContentDocumentValidationError(
+        `${path} must be a local path or HTTPS URL without credentials.`,
+      );
+    }
+    if (
+      parsed.protocol !== 'https:' ||
+      parsed.username.length > 0 ||
+      parsed.password.length > 0
+    ) {
+      throw new ContentDocumentValidationError(
+        `${path} must be a local path or HTTPS URL without credentials.`,
+      );
+    }
+  }
+  return src;
+}
+
+function isSafeHref(href: string): boolean {
+  if (isSafeLocalPath(href) || href.startsWith('#')) return true;
+  try {
+    const parsed = new URL(href);
+    return (
+      (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+      parsed.username.length === 0 &&
+      parsed.password.length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isSafeLocalPath(value: string): boolean {
+  if (
+    !value.startsWith('/') ||
+    value.startsWith('//') ||
+    value.includes('\\')
+  ) {
+    return false;
+  }
+  try {
+    return (
+      new URL(value, 'https://stack-atlas.invalid').origin ===
+      'https://stack-atlas.invalid'
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

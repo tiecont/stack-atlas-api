@@ -24,7 +24,7 @@ export interface CreateContentArticle {
 
 export interface CreateContentRevision {
   contentId: string;
-  expectedLatestRevisionId: string;
+  baseRevisionId: string;
   document: ContentDocumentV1;
   checksumSha256: string;
 }
