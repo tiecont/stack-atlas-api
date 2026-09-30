@@ -12,8 +12,9 @@ const validEnvironment = {
 };
 
 describe('isolated PostgreSQL test database creation', () => {
-  it('uses only the fixed disposable integration and e2e database names', () => {
+  it('uses separate fixed disposable migration, integration, and e2e database names', () => {
     expect(testDatabaseNames).toEqual([
+      'stack_atlas_migration_test',
       'stack_atlas_integration_test',
       'stack_atlas_e2e_test',
     ]);

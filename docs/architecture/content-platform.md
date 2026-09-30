@@ -9,11 +9,12 @@ repository uses PostgreSQL transactions and row locks to append a revision and
 move the latest pointer, publish and move the published pointer, or archive and
 restore an item without deleting its history.
 
-During this phase, Web Git remains the canonical authored source. The API does
-not import existing Git content, expose content read/authoring HTTP routes, or
-serve learner pages. Web keeps reading its local validated catalog. There is
-no dual-write. Web editor integration and an explicit cutover belong to later
-phases. No full admin HTTP CRUD surface is exposed by the lifecycle service.
+Web Git remains the canonical authored source during this phase. The API does
+not import existing Git content or serve learner pages, and there is no
+dual-write. The admin HTTP API exposes catalog creation, structured revision
+preview, lifecycle operations, publication, and published-only public reads.
+Web editor integration and an explicit authored-content cutover belong to a
+later phase.
 
 V1 is limited to article content. A future content kind needs its own validated
 document contract. The API contract is defined in
@@ -46,7 +47,10 @@ Historical creator fields remain nullable, while new item, revision, and archive
 writes use the account from `AuthenticatedPrincipal` and persist actor
 attribution.
 
-Future admin routes must run `SessionAuthGuard` and `PermissionGuard` before
-their controller and then pass the authenticated principal to the lifecycle
-service. This phase establishes authoring lifecycle semantics without creating
-an accidental public CMS.
+Admin routes run `SessionAuthGuard` before `PermissionGuard`, require the
+operation's typed platform permission, and pass the authenticated principal to
+the catalog service. `POST /api/v1/admin/content/:id/submit-for-review` makes
+the existing review transition available; publication remains restricted to
+`IN_REVIEW`. Public slug lookup returns only an active `PUBLISHED` item and
+never falls back to its latest draft. Responses contain structured Content
+Document V1 data; rendering HTML remains a Web responsibility.
