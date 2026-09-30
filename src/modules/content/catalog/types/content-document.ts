@@ -1,10 +1,46 @@
+export type InlineContentNodeV1 =
+  | { type: 'text'; text: string }
+  | { type: 'bold'; children: InlineContentNodeV1[] }
+  | { type: 'italic'; children: InlineContentNodeV1[] }
+  | { type: 'inline_code'; children: InlineContentNodeV1[] }
+  | { type: 'link'; href: string; children: InlineContentNodeV1[] };
+
+export type RichTextNodeV1 =
+  | { type: 'paragraph'; children: InlineContentNodeV1[] }
+  | { type: 'bullet_list'; items: InlineContentNodeV1[][] }
+  | { type: 'ordered_list'; items: InlineContentNodeV1[][] };
+
 export type ContentBlockV1 =
-  | { type: 'paragraph'; text: string }
-  | { type: 'heading'; level: 2 | 3; id: string; text: string }
-  | { type: 'code'; language: string; code: string }
-  | { type: 'list'; ordered: boolean; items: string[] }
-  | { type: 'callout'; tone: 'info' | 'warning'; text: string; title?: string }
-  | { type: 'quote'; text: string; attribution?: string };
+  | ContentBlockEnvelopeV1<'rich_text', { nodes: RichTextNodeV1[] }>
+  | ContentBlockEnvelopeV1<
+      'heading',
+      { level: 2 | 3 | 4; text: string; id?: string }
+    >
+  | ContentBlockEnvelopeV1<'code', { language: string; code: string }>
+  | ContentBlockEnvelopeV1<
+      'callout',
+      { tone: 'info' | 'warning'; text: string; title?: string }
+    >
+  | ContentBlockEnvelopeV1<
+      'image',
+      { src: string; alt: string; caption?: string }
+    >
+  | ContentBlockEnvelopeV1<
+      'table',
+      { headers: string[]; rows: string[][]; caption?: string }
+    >
+  | ContentBlockEnvelopeV1<'divider', Record<string, never>>
+  | ContentBlockEnvelopeV1<
+      'related_content',
+      { items: { title: string; href: string; description?: string }[] }
+    >;
+
+type ContentBlockEnvelopeV1<TType extends string, TProps> = {
+  id: string;
+  type: TType;
+  version: 1;
+  props: TProps;
+};
 
 export interface ContentDocumentV1 {
   schema_version: 1;
@@ -21,6 +57,7 @@ export class ContentDocumentValidationError extends Error {
 }
 
 const CONTENT_KEY_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,254}$/;
+const BLOCK_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
 const HEADING_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function validateContentKey(contentKey: string): string {
@@ -60,94 +97,204 @@ export function validateContentDocument(value: unknown): ContentDocumentV1 {
   const blocks = sourceBlocks.map((block, index) =>
     validateBlock(block, `document.blocks[${index}]`),
   );
+  const blockIds = new Set<string>();
+  for (const [index, block] of blocks.entries()) {
+    if (blockIds.has(block.id)) {
+      throw new ContentDocumentValidationError(
+        `document.blocks[${index}].id must be unique within the document.`,
+      );
+    }
+    blockIds.add(block.id);
+  }
   return { schema_version: 1, title, description, blocks };
 }
 
 function validateBlock(value: unknown, path: string): ContentBlockV1 {
   const block = record(value, path);
-  const type = block['type'];
-  switch (type) {
-    case 'paragraph':
-      exactKeys(block, ['type', 'text'], path);
-      return { type, text: boundedText(block['text'], `${path}.text`, 10_000) };
+  exactKeys(block, ['id', 'type', 'version', 'props'], path);
+  const id = boundedText(block['id'], `${path}.id`, 128);
+  if (!BLOCK_ID_PATTERN.test(id)) {
+    throw new ContentDocumentValidationError(
+      `${path}.id must start with a lowercase letter or digit and contain only lowercase letters, digits, dots, underscores, colons, or hyphens.`,
+    );
+  }
+  if (block['version'] !== 1) {
+    throw new ContentDocumentValidationError(`${path}.version must be 1.`);
+  }
+  const props = record(block['props'], `${path}.props`);
+
+  switch (block['type']) {
+    case 'rich_text':
+      exactKeys(props, ['nodes'], `${path}.props`);
+      return {
+        id,
+        type: 'rich_text',
+        version: 1,
+        props: {
+          nodes: validateRichTextNodes(props['nodes'], `${path}.props.nodes`),
+        },
+      };
     case 'heading': {
-      exactKeys(block, ['type', 'level', 'id', 'text'], path);
-      const level = block['level'];
-      if (level !== 2 && level !== 3) {
+      exactKeys(props, ['level', 'text', 'id'], `${path}.props`, ['id']);
+      const level = props['level'];
+      if (level !== 2 && level !== 3 && level !== 4) {
         throw new ContentDocumentValidationError(
-          `${path}.level must be 2 or 3.`,
+          `${path}.props.level must be 2, 3, or 4.`,
         );
       }
-      const id = boundedText(block['id'], `${path}.id`, 120);
-      if (!HEADING_ID_PATTERN.test(id)) {
+      const headingId = props['id'];
+      if (
+        headingId !== undefined &&
+        (typeof headingId !== 'string' ||
+          headingId.length > 120 ||
+          !HEADING_ID_PATTERN.test(headingId))
+      ) {
         throw new ContentDocumentValidationError(
-          `${path}.id must be a lowercase hyphenated heading ID.`,
+          `${path}.props.id must be a lowercase hyphenated heading ID.`,
         );
       }
       return {
-        type,
-        level,
         id,
-        text: boundedText(block['text'], `${path}.text`, 160),
+        type: 'heading',
+        version: 1,
+        props: {
+          level,
+          text: boundedText(props['text'], `${path}.props.text`, 160),
+          ...(headingId === undefined ? {} : { id: headingId }),
+        },
       };
     }
     case 'code':
-      exactKeys(block, ['type', 'language', 'code'], path);
+      exactKeys(props, ['language', 'code'], `${path}.props`);
       return {
-        type,
-        language: boundedText(block['language'], `${path}.language`, 40),
-        code: boundedText(block['code'], `${path}.code`, 100_000, true),
+        id,
+        type: 'code',
+        version: 1,
+        props: {
+          language: boundedText(
+            props['language'],
+            `${path}.props.language`,
+            40,
+          ),
+          code: boundedText(props['code'], `${path}.props.code`, 100_000, true),
+        },
       };
-    case 'list': {
-      exactKeys(block, ['type', 'ordered', 'items'], path);
-      if (typeof block['ordered'] !== 'boolean') {
-        throw new ContentDocumentValidationError(
-          `${path}.ordered must be a boolean.`,
-        );
-      }
-      const items = block['items'];
-      if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
-        throw new ContentDocumentValidationError(
-          `${path}.items must contain 1 to 100 entries.`,
-        );
-      }
-      return {
-        type,
-        ordered: block['ordered'],
-        items: items.map((item, index) =>
-          boundedText(item, `${path}.items[${index}]`, 2_000),
-        ),
-      };
-    }
     case 'callout': {
-      exactKeys(block, ['type', 'tone', 'text', 'title'], path, ['title']);
-      const tone = block['tone'];
+      exactKeys(props, ['tone', 'text', 'title'], `${path}.props`, ['title']);
+      const tone = props['tone'];
       if (tone !== 'info' && tone !== 'warning') {
         throw new ContentDocumentValidationError(
-          `${path}.tone must be info or warning.`,
+          `${path}.props.tone must be info or warning.`,
         );
       }
-      const title = block['title'];
+      const title = props['title'];
       return {
-        type,
-        tone,
-        text: boundedText(block['text'], `${path}.text`, 10_000),
-        ...(title === undefined
-          ? {}
-          : { title: boundedText(title, `${path}.title`, 160) }),
+        id,
+        type: 'callout',
+        version: 1,
+        props: {
+          tone,
+          text: boundedText(props['text'], `${path}.props.text`, 10_000),
+          ...(title === undefined
+            ? {}
+            : { title: boundedText(title, `${path}.props.title`, 160) }),
+        },
       };
     }
-    case 'quote': {
-      exactKeys(block, ['type', 'text', 'attribution'], path, ['attribution']);
-      const attribution = block['attribution'];
+    case 'image': {
+      exactKeys(props, ['src', 'alt', 'caption'], `${path}.props`, ['caption']);
+      const caption = props['caption'];
       return {
-        type,
-        text: boundedText(block['text'], `${path}.text`, 10_000),
-        ...(attribution === undefined
-          ? {}
-          : {
-              attribution: boundedText(attribution, `${path}.attribution`, 160),
-            }),
+        id,
+        type: 'image',
+        version: 1,
+        props: {
+          src: boundedText(props['src'], `${path}.props.src`, 2048),
+          alt: boundedText(props['alt'], `${path}.props.alt`, 1000, true),
+          ...(caption === undefined
+            ? {}
+            : { caption: boundedText(caption, `${path}.props.caption`, 500) }),
+        },
+      };
+    }
+    case 'table': {
+      exactKeys(props, ['headers', 'rows', 'caption'], `${path}.props`, [
+        'caption',
+      ]);
+      const headers = stringArray(
+        props['headers'],
+        `${path}.props.headers`,
+        20,
+        500,
+      );
+      const rows = props['rows'];
+      if (
+        !Array.isArray(rows) ||
+        rows.length === 0 ||
+        rows.length > 100 ||
+        !rows.every(
+          (row) =>
+            Array.isArray(row) &&
+            row.length === headers.length &&
+            row.every((cell) => isBoundedText(cell, 2000, true)),
+        )
+      ) {
+        throw new ContentDocumentValidationError(
+          `${path}.props.rows must contain 1 to 100 rows matching the header count.`,
+        );
+      }
+      const caption = props['caption'];
+      return {
+        id,
+        type: 'table',
+        version: 1,
+        props: {
+          headers,
+          rows: rows as string[][],
+          ...(caption === undefined
+            ? {}
+            : { caption: boundedText(caption, `${path}.props.caption`, 500) }),
+        },
+      };
+    }
+    case 'divider':
+      exactKeys(props, [], `${path}.props`);
+      return { id, type: 'divider', version: 1, props: {} };
+    case 'related_content': {
+      exactKeys(props, ['items'], `${path}.props`);
+      const items = props['items'];
+      if (!Array.isArray(items) || items.length === 0 || items.length > 20) {
+        throw new ContentDocumentValidationError(
+          `${path}.props.items must contain 1 to 20 entries.`,
+        );
+      }
+      return {
+        id,
+        type: 'related_content',
+        version: 1,
+        props: {
+          items: items.map((item, index) => {
+            const itemPath = `${path}.props.items[${index}]`;
+            const entry = record(item, itemPath);
+            exactKeys(entry, ['title', 'href', 'description'], itemPath, [
+              'description',
+            ]);
+            const description = entry['description'];
+            return {
+              title: boundedText(entry['title'], `${itemPath}.title`, 160),
+              href: boundedText(entry['href'], `${itemPath}.href`, 2048),
+              ...(description === undefined
+                ? {}
+                : {
+                    description: boundedText(
+                      description,
+                      `${itemPath}.description`,
+                      500,
+                    ),
+                  }),
+            };
+          }),
+        },
       };
     }
     default:
@@ -155,6 +302,103 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
         `${path}.type is not supported.`,
       );
   }
+}
+
+function validateRichTextNodes(value: unknown, path: string): RichTextNodeV1[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
+    throw new ContentDocumentValidationError(
+      `${path} must contain 1 to 500 nodes.`,
+    );
+  }
+  return value.map((item, index) => {
+    const nodePath = `${path}[${index}]`;
+    const node = record(item, nodePath);
+    if (node['type'] === 'paragraph') {
+      exactKeys(node, ['type', 'children'], nodePath);
+      return {
+        type: 'paragraph',
+        children: validateInlineNodes(
+          node['children'],
+          `${nodePath}.children`,
+          0,
+        ),
+      };
+    }
+    if (node['type'] === 'bullet_list' || node['type'] === 'ordered_list') {
+      exactKeys(node, ['type', 'items'], nodePath);
+      const items = node['items'];
+      if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
+        throw new ContentDocumentValidationError(
+          `${nodePath}.items must contain 1 to 100 entries.`,
+        );
+      }
+      return {
+        type: node['type'],
+        items: items.map((entry, itemIndex) =>
+          validateInlineNodes(entry, `${nodePath}.items[${itemIndex}]`, 0),
+        ),
+      };
+    }
+    throw new ContentDocumentValidationError(
+      `${nodePath}.type is not supported.`,
+    );
+  });
+}
+
+function validateInlineNodes(
+  value: unknown,
+  path: string,
+  depth: number,
+): InlineContentNodeV1[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
+    throw new ContentDocumentValidationError(
+      `${path} must contain 1 to 500 inline nodes.`,
+    );
+  }
+  if (depth > 16) {
+    throw new ContentDocumentValidationError(`${path} is nested too deeply.`);
+  }
+  return value.map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    const node = record(item, itemPath);
+    if (node['type'] === 'text') {
+      exactKeys(node, ['type', 'text'], itemPath);
+      return {
+        type: 'text',
+        text: boundedText(node['text'], `${itemPath}.text`, 10_000, true),
+      };
+    }
+    if (node['type'] === 'link') {
+      exactKeys(node, ['type', 'href', 'children'], itemPath);
+      return {
+        type: 'link',
+        href: boundedText(node['href'], `${itemPath}.href`, 2048),
+        children: validateInlineNodes(
+          node['children'],
+          `${itemPath}.children`,
+          depth + 1,
+        ),
+      };
+    }
+    if (
+      node['type'] === 'bold' ||
+      node['type'] === 'italic' ||
+      node['type'] === 'inline_code'
+    ) {
+      exactKeys(node, ['type', 'children'], itemPath);
+      return {
+        type: node['type'],
+        children: validateInlineNodes(
+          node['children'],
+          `${itemPath}.children`,
+          depth + 1,
+        ),
+      };
+    }
+    throw new ContentDocumentValidationError(
+      `${itemPath}.type is not supported.`,
+    );
+  });
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -201,15 +445,42 @@ function boundedText(
   maximum: number,
   allowEmpty = false,
 ): string {
-  if (
-    typeof value !== 'string' ||
-    value.length > maximum ||
-    (!allowEmpty && value.trim().length === 0)
-  ) {
+  if (!isBoundedText(value, maximum, allowEmpty)) {
     const detail = allowEmpty
       ? `at most ${maximum} characters`
       : `1 to ${maximum} non-blank characters`;
     throw new ContentDocumentValidationError(`${path} must contain ${detail}.`);
   }
   return value;
+}
+
+function isBoundedText(
+  value: unknown,
+  maximum: number,
+  allowEmpty = false,
+): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length <= maximum &&
+    (allowEmpty || value.trim().length > 0)
+  );
+}
+
+function stringArray(
+  value: unknown,
+  path: string,
+  maxItems: number,
+  maxLength: number,
+): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > maxItems ||
+    !value.every((item) => isBoundedText(item, maxLength))
+  ) {
+    throw new ContentDocumentValidationError(
+      `${path} must contain 1 to ${maxItems} non-blank strings of at most ${maxLength} characters.`,
+    );
+  }
+  return value as string[];
 }

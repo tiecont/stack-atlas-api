@@ -24,6 +24,7 @@ export interface CreateContentArticle {
 
 export interface CreateContentRevision {
   contentId: string;
+  expectedLatestRevisionId: string;
   document: ContentDocumentV1;
   checksumSha256: string;
 }
@@ -51,5 +52,14 @@ export class ContentRevisionNotFoundError extends Error {
   constructor() {
     super('The content revision was not found for this content item.');
     this.name = 'ContentRevisionNotFoundError';
+  }
+}
+
+export class ContentRevisionConflictError extends Error {
+  constructor() {
+    super(
+      'The content revision changed before this revision could be appended.',
+    );
+    this.name = 'ContentRevisionConflictError';
   }
 }

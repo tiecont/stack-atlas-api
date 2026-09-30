@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../../../src/database/database.service.js';
 import { ContentCatalogRepository } from '../../../src/modules/content/catalog/repositories/content-catalog.repository.js';
 import { ContentCatalogService } from '../../../src/modules/content/catalog/services/content-catalog.service.js';
+import { ContentRevisionConflictError } from '../../../src/modules/content/catalog/types/content-catalog.types.js';
 import { migrate } from '../../../scripts/migrations/runner.mjs';
 import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
@@ -36,6 +37,7 @@ describe('PostgreSQL content catalog', () => {
     );
     const second = await service.appendRevision(
       first.contentId,
+      first.revisionId,
       makeDocument('Second revision'),
     );
 
@@ -55,6 +57,46 @@ describe('PostgreSQL content catalog', () => {
     expect(secondPublication.revisionId).toBe(second.revisionId);
     expect(published?.revisionNumber).toBe(2);
     expect(published?.document.title).toBe('Second revision');
+
+    const competingWrites = await Promise.allSettled([
+      service.appendRevision(
+        first.contentId,
+        second.revisionId,
+        makeDocument('Competing revision A'),
+      ),
+      service.appendRevision(
+        first.contentId,
+        second.revisionId,
+        makeDocument('Competing revision B'),
+      ),
+    ]);
+    const winners = competingWrites.filter(
+      (result) => result.status === 'fulfilled',
+    );
+    const conflicts = competingWrites.filter(
+      (result) => result.status === 'rejected',
+    );
+    expect(winners).toHaveLength(1);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      status: 'rejected',
+      reason: expect.any(ContentRevisionConflictError),
+    });
+
+    await expect(
+      service.appendRevision(
+        first.contentId,
+        first.revisionId,
+        makeDocument('Stale revision write'),
+      ),
+    ).rejects.toBeInstanceOf(ContentRevisionConflictError);
+
+    const revisionCount = await pool!.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM stack_atlas.content_revisions WHERE content_item_id = $1`,
+      [first.contentId],
+    );
+    expect(revisionCount.rows[0]?.count).toBe('3');
 
     await expect(
       pool!.query(
@@ -94,8 +136,22 @@ function makeDocument(title: string) {
     description: 'A content platform foundation fixture.',
     blocks: [
       {
-        type: 'paragraph',
-        text: 'Authored Git content remains canonical for this phase.',
+        id: 'body',
+        type: 'rich_text',
+        version: 1,
+        props: {
+          nodes: [
+            {
+              type: 'paragraph',
+              children: [
+                {
+                  type: 'text',
+                  text: 'Authored Git content remains canonical for this phase.',
+                },
+              ],
+            },
+          ],
+        },
       },
     ],
   };

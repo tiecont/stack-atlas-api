@@ -108,6 +108,15 @@ publication history, and validation as a persistence foundation. It MUST NOT
 dual-write authored content, expose learner reads, or make PostgreSQL the
 content source before that cutover.
 
+The API owns persisted Content Document V1. Its canonical contract is
+`docs/contracts/content-v1.md`: document blocks use the
+`{ id, type, version: 1, props }` envelope with the eight documented block
+types; paragraphs, lists, and inline formatting belong in
+`rich_text.props.nodes`. Web mirrors the contract independently, and both
+repositories MUST keep their canonical JSON fixture semantically identical.
+Revision append MUST require the expected latest revision id and reject stale
+or competing writes while holding the content-item row lock.
+
 ## 4. Authorization and learning invariants
 
 ### AUTH-001 — Server-authoritative ownership

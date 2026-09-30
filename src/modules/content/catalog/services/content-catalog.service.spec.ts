@@ -8,17 +8,34 @@ const document = {
   title: 'Reliable systems',
   description: 'A short guide.',
   blocks: [
-    { type: 'paragraph', text: 'Transactions make state changes durable.' },
-    { type: 'heading', level: 2, id: 'trade-offs', text: 'Trade-offs' },
-    { type: 'code', language: 'sql', code: 'COMMIT;' },
-    { type: 'list', ordered: false, items: ['Safety', 'Liveness'] },
     {
-      type: 'callout',
-      tone: 'info',
-      title: 'Note',
-      text: 'Keep the contract versioned.',
+      id: 'body',
+      type: 'rich_text',
+      version: 1,
+      props: {
+        nodes: [
+          {
+            type: 'paragraph',
+            children: [
+              {
+                type: 'text',
+                text: 'Transactions make state changes durable.',
+              },
+            ],
+          },
+        ],
+      },
     },
-    { type: 'quote', text: 'Make state explicit.', attribution: 'Stack Atlas' },
+    {
+      id: 'notice',
+      type: 'callout',
+      version: 1,
+      props: {
+        tone: 'info',
+        title: 'Note',
+        text: 'Keep the contract versioned.',
+      },
+    },
   ],
 };
 
@@ -60,7 +77,14 @@ describe('ContentCatalogService', () => {
     expect(() =>
       service.createArticle('article:reliable-systems', {
         ...document,
-        blocks: [{ type: 'html', value: '<script>bad()</script>' }],
+        blocks: [
+          {
+            id: 'body',
+            type: 'html',
+            version: 1,
+            props: { value: '<script>bad()</script>' },
+          },
+        ],
       }),
     ).toThrow(ContentDocumentValidationError);
     expect(repository.createArticle).not.toHaveBeenCalled();
@@ -68,9 +92,31 @@ describe('ContentCatalogService', () => {
     expect(() =>
       service.createArticle('article:reliable-systems', {
         ...document,
-        blocks: [{ type: 'paragraph', text: 'Content', html: '<b>extra</b>' }],
+        blocks: [
+          {
+            id: 'body',
+            type: 'rich_text',
+            version: 1,
+            props: { nodes: [], html: '<b>extra</b>' },
+          },
+        ],
       }),
-    ).toThrow('document.blocks[0].html is not supported.');
+    ).toThrow('document.blocks[0].props.html is not supported.');
+  });
+
+  it('requires and forwards the latest revision the caller edited', async () => {
+    const repository = createRepository();
+    const service = new ContentCatalogService(repository);
+    repository.appendRevision.mockResolvedValue({} as never);
+
+    await service.appendRevision('content-id', 'revision-12', document);
+
+    expect(repository.appendRevision).toHaveBeenCalledWith({
+      contentId: 'content-id',
+      expectedLatestRevisionId: 'revision-12',
+      document,
+      checksumSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
   });
 
   it('produces the same checksum when JSON object keys are ordered differently', async () => {

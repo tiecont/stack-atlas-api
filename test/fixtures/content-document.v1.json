@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "title": "Canonical content contract",
+  "description": "The API owned, independently mirrored V1 document fixture.",
+  "blocks": [
+    {
+      "id": "intro",
+      "type": "rich_text",
+      "version": 1,
+      "props": {
+        "nodes": [
+          {
+            "type": "paragraph",
+            "children": [
+              { "type": "text", "text": "Structured " },
+              {
+                "type": "bold",
+                "children": [{ "type": "text", "text": "content" }]
+              },
+              { "type": "text", "text": " with " },
+              {
+                "type": "italic",
+                "children": [{ "type": "text", "text": "formatting" }]
+              },
+              { "type": "text", "text": ", " },
+              {
+                "type": "inline_code",
+                "children": [{ "type": "text", "text": "safe()" }]
+              },
+              { "type": "text", "text": ", and " },
+              {
+                "type": "link",
+                "href": "https://example.com/guide",
+                "children": [{ "type": "text", "text": "a safe external link" }]
+              },
+              { "type": "text", "text": "." }
+            ]
+          },
+          {
+            "type": "bullet_list",
+            "items": [[{ "type": "text", "text": "First item" }]]
+          },
+          {
+            "type": "ordered_list",
+            "items": [[{ "type": "text", "text": "Second item" }]]
+          }
+        ]
+      }
+    },
+    {
+      "id": "overview",
+      "type": "heading",
+      "version": 1,
+      "props": { "level": 2, "id": "overview", "text": "Overview" }
+    },
+    {
+      "id": "example-code",
+      "type": "code",
+      "version": 1,
+      "props": { "language": "go", "code": "fmt.Println(\"safe\")" }
+    },
+    {
+      "id": "input-warning",
+      "type": "callout",
+      "version": 1,
+      "props": {
+        "tone": "warning",
+        "title": "Check",
+        "text": "Validate inputs."
+      }
+    },
+    {
+      "id": "system-diagram",
+      "type": "image",
+      "version": 1,
+      "props": {
+        "src": "/images/architecture.svg",
+        "alt": "A system diagram",
+        "caption": "System view"
+      }
+    },
+    {
+      "id": "ownership-table",
+      "type": "table",
+      "version": 1,
+      "props": {
+        "headers": ["Layer", "Owner"],
+        "rows": [["Web", "Stack Atlas"]],
+        "caption": "Ownership"
+      }
+    },
+    { "id": "section-break", "type": "divider", "version": 1, "props": {} },
+    {
+      "id": "related-guides",
+      "type": "related_content",
+      "version": 1,
+      "props": {
+        "items": [
+          {
+            "title": "Architecture guide",
+            "href": "/articles/architecture/guide/",
+            "description": "System boundaries."
+          }
+        ]
+      }
+    }
+  ]
+}

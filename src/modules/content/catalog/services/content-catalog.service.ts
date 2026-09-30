@@ -42,11 +42,16 @@ export class ContentCatalogService {
 
   appendRevision(
     contentId: string,
+    expectedLatestRevisionId: string,
     document: unknown,
   ): Promise<ContentRevisionRecord> {
+    if (!expectedLatestRevisionId.trim()) {
+      throw new TypeError('expectedLatestRevisionId is required.');
+    }
     const validatedDocument = validateContentDocument(document);
     return this.repository.appendRevision({
       contentId,
+      expectedLatestRevisionId,
       document: validatedDocument,
       checksumSha256: checksum(validatedDocument),
     });

@@ -12,6 +12,7 @@ import type {
 import {
   ContentIdentityConflictError,
   ContentItemNotFoundError,
+  ContentRevisionConflictError,
   ContentRevisionNotFoundError,
 } from '../types/content-catalog.types';
 
@@ -81,6 +82,9 @@ export class ContentCatalogRepository {
   appendRevision(input: CreateContentRevision): Promise<ContentRevisionRecord> {
     return this.database.transaction(async (client) => {
       const item = await this.lockContentItem(client, input.contentId);
+      if (item.latest_revision_id !== input.expectedLatestRevisionId) {
+        throw new ContentRevisionConflictError();
+      }
       const current = await client.query<
         { revision_number: number } & QueryResultRow
       >(
