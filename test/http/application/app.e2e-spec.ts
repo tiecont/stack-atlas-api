@@ -4,9 +4,9 @@ import { resolve } from 'node:path';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { configureHttp } from '../../src/app.config';
-import { AppModule } from '../../src/app.module';
-import { DATABASE_POOL } from '../../src/database/database.constants';
+import { configureHttp } from '../../../src/app.config';
+import { AppModule } from '../../../src/app.module';
+import { DATABASE_POOL } from '../../../src/database/database.constants';
 
 describe('API foundation HTTP contract', () => {
   let app: INestApplication;

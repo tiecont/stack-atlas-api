@@ -20,7 +20,7 @@ function derive(password: string, salt: Buffer): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     scryptCallback(password, salt, KEY_LENGTH, SCRYPT_OPTIONS, (error, key) => {
       if (error) reject(error);
-      else resolve(key as Buffer);
+      else resolve(Buffer.from(key));
     });
   });
 }

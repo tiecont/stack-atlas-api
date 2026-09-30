@@ -2,9 +2,9 @@ import { ConfigService } from '@nestjs/config';
 import type { Pool } from 'pg';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { DatabaseService } from '../../../src/database/database.service';
-import { SessionRepository } from '../../../src/modules/identity/session/repositories/session.repository';
-import { SessionService } from '../../../src/modules/identity/session/services/session.service';
+import { DatabaseService } from '../../../../database/database.service';
+import { SessionRepository } from '../repositories/session.repository';
+import { SessionService } from './session.service';
 
 const expiration = '2026-10-04T00:00:00.000Z';
 const activeSessionRow = {

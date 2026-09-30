@@ -25,7 +25,9 @@ export class SessionRepository {
        RETURNING expires_at`,
       [sessionId, accountId, tokenHash, ttlSeconds],
     );
-    return new Date(result.rows[0]!.expires_at).toISOString();
+    const row = result.rows[0];
+    if (!row) throw new Error('Session insert did not return its expiry.');
+    return new Date(row.expires_at).toISOString();
   }
 
   async findActiveByTokenHash(

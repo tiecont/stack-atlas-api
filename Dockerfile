@@ -48,6 +48,7 @@ RUN npm ci --omit=dev
 
 COPY --from=builder --chown=app:app /app/dist ./dist
 COPY --chown=app:app database/migrations ./database/migrations
+COPY --chown=app:app scripts/migrations ./scripts/migrations
 
 USER app
 

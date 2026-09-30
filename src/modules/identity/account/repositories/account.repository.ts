@@ -29,7 +29,9 @@ export class AccountRepository {
        RETURNING id, email, created_at`,
       [accountId, email, passwordHash],
     );
-    return toAccount(result.rows[0]!);
+    const row = result.rows[0];
+    if (!row) throw new Error('Account insert did not return a row.');
+    return toAccount(row);
   }
 
   async findById(accountId: string): Promise<Account | null> {

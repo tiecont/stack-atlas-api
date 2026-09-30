@@ -16,6 +16,7 @@ repositories.
 npm ci
 cp .env.example .env
 docker compose up -d postgres
+npm run build
 npm run migrate
 npm run start:dev
 ```
@@ -24,7 +25,8 @@ For containerized development:
 
 ```sh
 docker compose up -d postgres
-docker compose run --build --rm api npm run migrate
+docker compose run --build --rm api npm run build
+docker compose run --rm api npm run migrate
 LOCAL_UID="$(id -u)" LOCAL_GID="$(id -g)" docker compose up --build -d api
 ```
 
@@ -46,8 +48,11 @@ HTTPS origins and always sets the session cookie's `Secure` attribute.
 `POSTGRES_PORT` and `API_PORT` change the host ports published by the development
 Compose file. When changing `POSTGRES_PORT` for host-run commands, update both
 database URLs to use that port. `LOCAL_UID` and `LOCAL_GID` set the user used by
-the development container for bind-mounted files. `DATABASE_TEST_URL` points to the separate disposable test database;
-the Postgres init script creates it when the named data volume is first created.
+the development container for bind-mounted files. `DATABASE_TEST_URL` points to
+the disposable local test database; the Postgres init script creates it when
+the named data volume is first created. PostgreSQL tests require
+`ALLOW_DESTRUCTIVE_TEST_DATABASE=true` and refuse non-local hosts or database
+names outside the Stack Atlas test allowlist.
 If reusing a volume created before that script existed, create the test database
 once with `CREATE DATABASE stack_atlas_test OWNER stack_atlas`.
 
@@ -89,23 +94,64 @@ shared rate limiter; add edge or durable shared rate limiting before public
 credential traffic. MFA and session-management UI are later identity work.
 The Engine is not needed for health or identity and is not a startup dependency.
 
+## Content platform foundation
+
+The API now owns stable article identity, validated immutable revisions, and
+publication history in PostgreSQL. The content service is not exposed through
+HTTP yet; authoring endpoints and admin authorization are the next API phase.
+Web Git remains the canonical authored source, and this foundation does not
+import existing articles or change Web reads. See
+[`docs/architecture/content-platform.md`](docs/architecture/content-platform.md)
+for the phase boundary and
+[`docs/contracts/content-v1.md`](docs/contracts/content-v1.md) for the V1
+document and persistence rules.
+
 See [`docs/contracts/identity-v1.md`](docs/contracts/identity-v1.md) for the
 stable endpoint and cookie contract.
 
 ## Database changes
 
-PostgreSQL owns the `stack_atlas` schema. Create new migrations under the owning
-context and feature, for example:
+PostgreSQL owns the `stack_atlas` schema. After `npm run build`, create a new
+schema migration beside its owning feature:
 
 ```sh
-npm run migration:create -- identity account add_account_status
+npm run migration:create -- identity account AddAccountStatus
+npm run migration:check-timestamps
+npm run migration:preflight
 npm run migrate
 ```
 
-The migration helper uses the generator's UTC timestamp, preserving its
-millisecond component while keeping the existing chronological migration
-ordering. It writes under `database/migrations/<context>/<feature>/`. The runner
-searches legacy root migrations and nested `*.js`/`*.cjs` feature migrations.
+The generator runs `date +%s%3N` and creates a timestamped TypeScript class in
+`src/modules/<context>/<feature>/migrations/`. Data transformations belong in
+`data-migrations/`; keep those separate from schema changes. `npm run migrate`
+applies deployed legacy history and feature schema migrations. Run data changes
+only through the explicit `npm run migration:data-up` command after
+`npm run migration:preflight:data` confirms that schema prerequisites are met.
+The runner keeps the deployed root and nested JavaScript migration history on
+`node-pg-migrate`, then discovers feature-owned TypeScript migrations from
+compiled output. It applies each group in timestamp order and rolls them back in
+reverse order. Do not add new JavaScript migrations.
+
+`migration:preflight` is read-only: it checks the configured target, migration
+history, source availability, and pending counts. `migrate` runs the same
+preflight before applying. `migration:down` reverses one latest feature
+migration, or one legacy migration after feature migrations are exhausted.
+Review the target and migration SQL before applying or rolling back.
+A failed feature migration rolls back its transaction; a failed legacy
+migration follows `node-pg-migrate` transaction behavior. Fix the cause and
+rerun the same command after checking the applied histories.
+
+CI runs `migration:verify` against a randomly named disposable PostgreSQL
+database. Set `DATABASE_VERIFY_ADMIN_URL` to a PostgreSQL administrator
+connection for the `postgres` maintenance database with permission to create
+and drop databases. The verification command applies all legacy and schema
+migrations, applies data migrations after schema migrations, checks histories
+and counts by kind, rolls them back, and drops only the
+randomly named disposable database it created. Run it after `npm run build`.
+If the process is forcibly terminated before cleanup, inspect the database
+cluster for only the `stack_atlas_migration_verify_` database created by that
+run and remove that temporary database after confirming no verifier is active.
+
 Treat deployed migrations as immutable; use new migrations for later changes
 and use expand, backfill, verify, then contract for destructive evolution.
 
@@ -152,17 +198,29 @@ npm run typecheck
 npm run lint
 npm test
 npm run build
+npm run migration:check-timestamps
 ```
 
 PostgreSQL-backed integration and identity HTTP tests require a disposable
 database in `DATABASE_TEST_URL`:
 
 ```sh
-npm run migrate
+npm run build
+npm run migration:verify
 npm run test:integration
 npm run test:e2e
 ```
 
-The GitHub Actions workflow runs these checks against PostgreSQL 16 and applies
-migrations from an empty database. Do not point integration tests at a database
-containing data that must be preserved. No API test requires a live Engine.
+`npm run migrate` applies legacy and feature schema migrations. Data migrations
+are separate: run `npm run migration:preflight:data`, then
+`npm run migration:data-up` only after all schema migrations are applied. The
+CI workflow creates separate integration and e2e databases. For local runs, the
+same disposable test database may be reused because each suite applies the
+canonical migration runner before exercising the API. The integration and e2e
+commands fail if `DATABASE_TEST_URL` or the destructive-test opt-in is missing.
+
+The GitHub Actions workflow runs these checks against PostgreSQL 16 and verifies
+migrations from an empty disposable database, including rollback. Never point
+tests at a database containing data that must be preserved. No API test requires
+a live Engine. Production migration release steps are in
+[`docs/operations/migrations.md`](docs/operations/migrations.md).

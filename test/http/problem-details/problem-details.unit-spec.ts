@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { describe, expect, it } from 'vitest';
-import { toProblemDetails } from '../../src/common/errors/problem-details';
+import { toProblemDetails } from '../../../src/common/errors/problem-details';
 
 describe('toProblemDetails', () => {
   it('returns a client error without reflecting untrusted exception text', () => {

@@ -1,10 +1,10 @@
 import { ConflictException } from '@nestjs/common';
 import type { Pool } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
-import { DatabaseService } from '../../../src/database/database.service';
-import { AccountRepository } from '../../../src/modules/identity/account/repositories/account.repository';
-import { AccountService } from '../../../src/modules/identity/account/services/account.service';
-import type { PasswordHasher } from '../../../src/modules/identity/account/services/password-hasher.service';
+import { DatabaseService } from '../../../../database/database.service';
+import { AccountRepository } from '../repositories/account.repository';
+import { AccountService } from './account.service';
+import type { PasswordHasher } from './password-hasher.service';
 
 const accountRow = {
   id: '4aa6cf31-06cf-4422-a9b3-c508f71ef6f5',
