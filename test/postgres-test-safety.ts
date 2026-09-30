@@ -1,4 +1,5 @@
-const SAFE_DATABASE_NAME = /^stack_atlas_(?:test|integration_test|e2e_test)$/;
+const SAFE_DATABASE_NAME =
+  /^stack_atlas_(?:test|migration_test|integration_test|e2e_test)$/;
 const SAFE_DATABASE_HOSTS = new Set([
   'localhost',
   '127.0.0.1',

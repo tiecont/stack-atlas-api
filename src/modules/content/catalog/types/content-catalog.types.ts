@@ -38,10 +38,41 @@ export interface ContentRevisionRecord {
   checksumSha256: string;
   document: ContentDocumentV1;
   createdAt: Date;
+  publishedAt?: Date | null;
+  publishedBy?: string | null;
 }
 
 export interface PublishedContentRecord extends ContentRevisionRecord {
   publishedAt: Date;
+  publishedBy: string | null;
+}
+
+export interface ContentRevisionSummary {
+  contentId: string;
+  revisionId: string;
+  revisionNumber: number;
+  checksumSha256: string;
+  revisionCreatedBy: string | null;
+  createdAt: Date;
+  publishedAt: Date | null;
+  publishedBy: string | null;
+}
+
+export interface ContentListCursor {
+  createdAt: string;
+  contentId: string;
+}
+
+export interface ContentListResult {
+  items: ContentLifecycleRecord[];
+  hasMore: boolean;
+  nextCursor: ContentListCursor | null;
+}
+
+export interface ContentRevisionListResult {
+  items: ContentRevisionSummary[];
+  hasMore: boolean;
+  nextCursor: number | null;
 }
 
 export interface CreateContentArticle {
@@ -64,6 +95,7 @@ export interface PublishContentRevision {
   contentId: string;
   revisionId: string;
   expectedStatus: ContentStatus;
+  actorAccountId: string;
 }
 
 export interface TransitionContentStatus {

@@ -13,6 +13,12 @@ export class ProblemDetailsDto {
   @ApiPropertyOptional({ example: 'The request could not be processed.' })
   detail?: string;
 
+  @ApiPropertyOptional({ example: 'content_revision_conflict' })
+  code?: string;
+
+  @ApiPropertyOptional({ example: false })
+  retryable?: boolean;
+
   @ApiProperty({ example: '/api/v1/resource' })
   instance!: string;
 

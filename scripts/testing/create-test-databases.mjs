@@ -3,13 +3,12 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const testDatabaseNames = Object.freeze([
+  'stack_atlas_migration_test',
   'stack_atlas_integration_test',
   'stack_atlas_e2e_test',
 ]);
 
-export function getTestDatabaseAdminUrl(
-  environment = process.env,
-) {
+export function getTestDatabaseAdminUrl(environment = process.env) {
   if (environment['NODE_ENV'] !== 'test') {
     throw new Error('Test database creation requires NODE_ENV=test.');
   }
@@ -27,7 +26,9 @@ export function getTestDatabaseAdminUrl(
   try {
     adminUrl = new URL(adminUrlValue);
   } catch {
-    throw new Error('DATABASE_VERIFY_ADMIN_URL must be a valid PostgreSQL URL.');
+    throw new Error(
+      'DATABASE_VERIFY_ADMIN_URL must be a valid PostgreSQL URL.',
+    );
   }
   if (
     !['postgres:', 'postgresql:'].includes(adminUrl.protocol) ||
@@ -50,7 +51,9 @@ export async function createTestDatabases(environment = process.env) {
   try {
     const current = await pool.query('SELECT current_database() AS name');
     if (current.rows[0]?.name !== 'postgres') {
-      throw new Error('Refusing test database creation outside postgres database.');
+      throw new Error(
+        'Refusing test database creation outside postgres database.',
+      );
     }
 
     for (const name of testDatabaseNames) {
@@ -59,12 +62,16 @@ export async function createTestDatabases(environment = process.env) {
         [name],
       );
       if (existing.rowCount !== 0) {
-        throw new Error(`Refusing to replace existing test database "${name}".`);
+        throw new Error(
+          `Refusing to replace existing test database "${name}".`,
+        );
       }
       await pool.query(`CREATE DATABASE "${name}"`);
       created.push(name);
     }
-    console.log(`Created disposable test databases: ${testDatabaseNames.join(', ')}.`);
+    console.log(
+      `Created disposable test databases: ${testDatabaseNames.join(', ')}.`,
+    );
   } catch (error) {
     for (const name of created.reverse()) {
       await pool.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
@@ -80,7 +87,9 @@ if (
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 ) {
   createTestDatabases().catch((error) => {
-    console.error(error instanceof Error ? error.message : 'Test database creation failed.');
+    console.error(
+      error instanceof Error ? error.message : 'Test database creation failed.',
+    );
     process.exitCode = 1;
   });
 }

@@ -17,6 +17,11 @@ describe('PostgreSQL test database safety', () => {
     expect(requirePostgresTestDatabaseUrl(testEnvironment(databaseUrl))).toBe(
       databaseUrl,
     );
+    const migrationDatabaseUrl =
+      'postgresql://stack_atlas:local@127.0.0.1:5432/stack_atlas_migration_test';
+    expect(
+      requirePostgresTestDatabaseUrl(testEnvironment(migrationDatabaseUrl)),
+    ).toBe(migrationDatabaseUrl);
   });
 
   it('requires the explicit destructive-test opt-in', () => {

@@ -50,8 +50,11 @@ function createRepository() {
     findRevision: vi.fn(),
     publishRevision: vi.fn(),
     findPublishedByKey: vi.fn(),
+    findPublishedBySlug: vi.fn(),
     findLifecycle: vi.fn(),
     transitionStatus: vi.fn(),
+    listContent: vi.fn(),
+    listRevisions: vi.fn(),
   } satisfies Pick<
     ContentCatalogRepository,
     | 'createArticle'
@@ -59,8 +62,11 @@ function createRepository() {
     | 'findRevision'
     | 'publishRevision'
     | 'findPublishedByKey'
+    | 'findPublishedBySlug'
     | 'findLifecycle'
     | 'transitionStatus'
+    | 'listContent'
+    | 'listRevisions'
   >;
 }
 

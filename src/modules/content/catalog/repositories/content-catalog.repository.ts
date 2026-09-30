@@ -5,8 +5,12 @@ import { DatabaseService } from '../../../../database/database.service';
 import type {
   CreateContentArticle,
   CreateContentRevision,
+  ContentListCursor,
+  ContentListResult,
   ContentLifecycleRecord,
+  ContentRevisionListResult,
   ContentRevisionRecord,
+  ContentRevisionSummary,
   PublishedContentRecord,
   PublishContentRevision,
   TransitionContentStatus,
@@ -47,6 +51,22 @@ interface RevisionRow extends QueryResultRow {
   created_by: string | null;
   created_at: Date;
   published_at?: Date;
+  published_by?: string | null;
+}
+
+interface ContentListRow extends ContentRow {
+  cursor_created_at: string;
+}
+
+interface ContentRevisionSummaryRow extends QueryResultRow {
+  content_item_id: string;
+  id: string;
+  revision_number: number;
+  checksum_sha256: string;
+  created_by: string | null;
+  created_at: Date;
+  published_at: Date | null;
+  published_by: string | null;
 }
 
 @Injectable()
@@ -176,11 +196,18 @@ export class ContentCatalogRepository {
               item.slug, item.status, item.created_by AS item_created_by,
               revision.id, revision.content_item_id, revision.revision_number,
               revision.schema_version, revision.checksum_sha256, revision.document,
-              revision.created_by,
-              revision.created_at
+              revision.created_by, revision.created_at,
+              publication.published_at, publication.published_by
        FROM stack_atlas.content_items AS item
        JOIN stack_atlas.content_revisions AS revision
          ON revision.content_item_id = item.id
+       LEFT JOIN LATERAL (
+         SELECT published_at, published_by
+         FROM stack_atlas.content_publications
+         WHERE revision_id = revision.id
+         ORDER BY published_at DESC
+         LIMIT 1
+       ) AS publication ON true
        WHERE item.id = $1 AND revision.id = $2`,
       [contentId, revisionId],
     );
@@ -197,6 +224,90 @@ export class ContentCatalogRepository {
       },
       row,
     );
+  }
+
+  async listContent(input: {
+    limit: number;
+    status?: ContentStatus;
+    before?: ContentListCursor;
+  }): Promise<ContentListResult> {
+    const values: (string | number)[] = [];
+    const conditions: string[] = [];
+    const bind = (value: string | number): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+    if (input.status) conditions.push(`status = ${bind(input.status)}`);
+    if (input.before) {
+      const createdAt = bind(input.before.createdAt);
+      const contentId = bind(input.before.contentId);
+      conditions.push(
+        `(created_at, id) < (${createdAt}::timestamptz, ${contentId}::uuid)`,
+      );
+    }
+    const limit = bind(input.limit + 1);
+    const result = await this.database.query<ContentListRow>(
+      `SELECT id, content_key, content_type, slug, status,
+              latest_revision_id, published_revision_id, created_by,
+              archived_at, archived_by, created_at, updated_at,
+              created_at::text AS cursor_created_at
+       FROM stack_atlas.content_items
+       ${conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ${limit}`,
+      values,
+    );
+    const hasMore = result.rows.length > input.limit;
+    const items = result.rows.slice(0, input.limit);
+    const last = items.at(-1);
+    return {
+      items: items.map(mapLifecycle),
+      hasMore,
+      nextCursor:
+        hasMore && last
+          ? { createdAt: last.cursor_created_at, contentId: last.id }
+          : null,
+    };
+  }
+
+  async listRevisions(
+    contentId: string,
+    limit: number,
+    beforeRevisionNumber?: number,
+  ): Promise<ContentRevisionListResult> {
+    const beforeClause =
+      beforeRevisionNumber === undefined
+        ? ''
+        : 'AND revision.revision_number < $3';
+    const values =
+      beforeRevisionNumber === undefined
+        ? [contentId, limit + 1]
+        : [contentId, limit + 1, beforeRevisionNumber];
+    const result = await this.database.query<ContentRevisionSummaryRow>(
+      `SELECT revision.content_item_id, revision.id, revision.revision_number,
+              revision.checksum_sha256, revision.created_by, revision.created_at,
+              publication.published_at, publication.published_by
+       FROM stack_atlas.content_revisions AS revision
+       LEFT JOIN LATERAL (
+         SELECT published_at, published_by
+         FROM stack_atlas.content_publications
+         WHERE revision_id = revision.id
+         ORDER BY published_at DESC
+         LIMIT 1
+       ) AS publication ON true
+       WHERE revision.content_item_id = $1 ${beforeClause}
+       ORDER BY revision.revision_number DESC
+       LIMIT $2`,
+      values,
+    );
+    const hasMore = result.rows.length > limit;
+    const items = result.rows.slice(0, limit);
+    const last = items.at(-1);
+    return {
+      items: items.map(mapRevisionSummary),
+      hasMore,
+      nextCursor: hasMore && last ? last.revision_number : null,
+    };
   }
 
   publishRevision(
@@ -221,16 +332,20 @@ export class ContentCatalogRepository {
       if (!row) throw new ContentRevisionNotFoundError();
 
       const publication = await client.query<
-        { published_at: Date } & QueryResultRow
+        { published_at: Date; published_by: string } & QueryResultRow
       >(
-        `INSERT INTO stack_atlas.content_publications (id, content_item_id, revision_id, published_at)
-         VALUES ($1, $2, $3, now())
-         RETURNING published_at`,
-        [randomUUID(), item.id, row.id],
+        `INSERT INTO stack_atlas.content_publications
+           (id, content_item_id, revision_id, published_at, published_by)
+         VALUES ($1, $2, $3, now(), $4)
+         RETURNING published_at, published_by`,
+        [randomUUID(), item.id, row.id, input.actorAccountId],
       );
       const publishedAt = publication.rows[0]?.published_at;
+      const publishedBy = publication.rows[0]?.published_by;
       if (!publishedAt)
         throw new Error('PostgreSQL did not return the publication timestamp.');
+      if (!publishedBy)
+        throw new Error('PostgreSQL did not return the publication actor.');
       const updatedItem = await client.query<ContentRow>(
         `UPDATE stack_atlas.content_items
          SET published_revision_id = $2, status = 'PUBLISHED', updated_at = now()
@@ -242,12 +357,25 @@ export class ContentCatalogRepository {
       );
       const publishedItem = updatedItem.rows[0];
       if (!publishedItem) throw new ContentLifecycleConflictError();
-      return { ...mapRevision(publishedItem, row), publishedAt };
+      return { ...mapRevision(publishedItem, row), publishedAt, publishedBy };
     });
   }
 
   async findPublishedByKey(
     contentKey: string,
+  ): Promise<PublishedContentRecord | null> {
+    return this.findPublishedByIdentity('content_key', contentKey);
+  }
+
+  async findPublishedBySlug(
+    slug: string,
+  ): Promise<PublishedContentRecord | null> {
+    return this.findPublishedByIdentity('slug', slug);
+  }
+
+  private async findPublishedByIdentity(
+    identityColumn: 'content_key' | 'slug',
+    identity: string,
   ): Promise<PublishedContentRecord | null> {
     const result = await this.database.query<
       (RevisionRow & {
@@ -264,20 +392,23 @@ export class ContentCatalogRepository {
               item.slug, item.status, item.created_by AS item_created_by,
               revision.id, revision.content_item_id, revision.revision_number,
               revision.schema_version, revision.checksum_sha256, revision.document,
-              revision.created_by, revision.created_at, publication.published_at
+              revision.created_by, revision.created_at,
+              publication.published_at, publication.published_by
        FROM stack_atlas.content_items AS item
        JOIN stack_atlas.content_revisions AS revision
          ON revision.id = item.published_revision_id
         AND revision.content_item_id = item.id
        JOIN LATERAL (
-         SELECT published_at
+         SELECT published_at, published_by
          FROM stack_atlas.content_publications
          WHERE content_item_id = item.id AND revision_id = revision.id
          ORDER BY published_at DESC
          LIMIT 1
        ) AS publication ON true
-       WHERE item.content_key = $1 AND item.archived_at IS NULL`,
-      [contentKey],
+       WHERE item.${identityColumn} = $1
+         AND item.status = 'PUBLISHED'
+         AND item.archived_at IS NULL`,
+      [identity],
     );
     const row = result.rows[0];
     if (!row) return null;
@@ -294,6 +425,7 @@ export class ContentCatalogRepository {
         row,
       ),
       publishedAt: row.published_at ?? row.created_at,
+      publishedBy: row.published_by ?? null,
     };
   }
 
@@ -445,6 +577,12 @@ function mapRevision(
     checksumSha256: revision.checksum_sha256,
     document: revision.document,
     createdAt: revision.created_at,
+    ...(revision.published_at !== undefined
+      ? { publishedAt: revision.published_at }
+      : {}),
+    ...(revision.published_by !== undefined
+      ? { publishedBy: revision.published_by }
+      : {}),
   };
 }
 
@@ -461,6 +599,21 @@ function mapLifecycle(item: ContentRow): ContentLifecycleRecord {
     archivedBy: item.archived_by,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
+  };
+}
+
+function mapRevisionSummary(
+  revision: ContentRevisionSummaryRow,
+): ContentRevisionSummary {
+  return {
+    contentId: revision.content_item_id,
+    revisionId: revision.id,
+    revisionNumber: revision.revision_number,
+    checksumSha256: revision.checksum_sha256,
+    revisionCreatedBy: revision.created_by,
+    createdAt: revision.created_at,
+    publishedAt: revision.published_at,
+    publishedBy: revision.published_by,
   };
 }
 

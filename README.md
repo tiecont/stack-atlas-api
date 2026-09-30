@@ -214,10 +214,11 @@ npm run test:e2e
 `npm run migrate` applies legacy and feature schema migrations. Data migrations
 are separate: run `npm run migration:preflight:data`, then
 `npm run migration:data-up` only after all schema migrations are applied. The
-CI workflow creates separate integration and e2e databases. For local runs, the
-same disposable test database may be reused because each suite applies the
-canonical migration runner before exercising the API. The integration and e2e
-commands fail if `DATABASE_TEST_URL` or the destructive-test opt-in is missing.
+CI workflow creates separate migration, integration, and e2e databases.
+Destructive migration tests use `stack_atlas_migration_test`, PostgreSQL feature
+integration tests use `stack_atlas_integration_test`, and HTTP e2e tests use
+`stack_atlas_e2e_test`. The integration and e2e commands fail if
+`DATABASE_TEST_URL` or the destructive-test opt-in is missing.
 
 The GitHub Actions workflow runs these checks against PostgreSQL 16 and verifies
 migrations from an empty disposable database, including rollback. Never point

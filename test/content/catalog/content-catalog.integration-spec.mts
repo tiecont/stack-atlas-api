@@ -197,9 +197,7 @@ describe('PostgreSQL content catalog lifecycle', () => {
       archivedBy: null,
       publishedRevisionId: second.revisionId,
     });
-    expect((await service.findPublishedByKey(contentKey))?.revisionId).toBe(
-      second.revisionId,
-    );
+    await expect(service.findPublishedByKey(contentKey)).resolves.toBeNull();
 
     await expect(
       pool!.query(

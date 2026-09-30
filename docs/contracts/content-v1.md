@@ -49,8 +49,10 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 - A revision stores a validated document and SHA-256 checksum of canonical JSON.
 - Publication history is append-only. The current published revision points to
   one immutable revision belonging to the same content identity.
-- Git import/cutover is not part of this foundation. Lifecycle commands check
-  current platform permissions, while HTTP routes remain out of scope.
+- Git import/cutover is not part of this phase. Admin HTTP routes check current
+  platform permissions and call the catalog service; public HTTP reads return
+  only active published revisions. HTTP responses contain structured
+  Content Document V1 data, never rendered HTML.
 
 ## Document
 

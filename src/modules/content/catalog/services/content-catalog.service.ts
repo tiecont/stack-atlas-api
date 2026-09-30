@@ -7,7 +7,9 @@ import { PlatformAuthorizationService } from '../../../identity/platform-authori
 import { ContentCatalogRepository } from '../repositories/content-catalog.repository';
 import type {
   ContentLifecycleRecord,
+  ContentRevisionListResult,
   ContentRevisionRecord,
+  ContentRevisionSummary,
   PublishedContentRecord,
   ContentStatus,
 } from '../types/content-catalog.types';
@@ -23,6 +25,12 @@ import {
   validateContentKey,
 } from '../types/content-document';
 import { normalizeContentSlug } from '../types/content-slug';
+import {
+  decodeContentListCursor,
+  decodeRevisionCursor,
+  encodeContentListCursor,
+  encodeRevisionCursor,
+} from '../helpers/content-pagination';
 
 type ContentCatalogStore = Pick<
   ContentCatalogRepository,
@@ -31,8 +39,11 @@ type ContentCatalogStore = Pick<
   | 'findRevision'
   | 'publishRevision'
   | 'findPublishedByKey'
+  | 'findPublishedBySlug'
   | 'findLifecycle'
   | 'transitionStatus'
+  | 'listContent'
+  | 'listRevisions'
 >;
 
 type PlatformAuthorization = Pick<
@@ -120,6 +131,7 @@ export class ContentCatalogService {
       contentId,
       revisionId,
       expectedStatus: item.status,
+      actorAccountId: principal.accountId,
     });
   }
 
@@ -187,6 +199,73 @@ export class ContentCatalogService {
     contentKey: string,
   ): Promise<PublishedContentRecord | null> {
     return this.repository.findPublishedByKey(validateContentKey(contentKey));
+  }
+
+  async listContent(
+    input: { limit: number; cursor?: string; status?: ContentStatus },
+    principal: AuthenticatedPrincipal,
+  ): Promise<{ items: ContentLifecycleRecord[]; nextCursor: string | null }> {
+    await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
+    const before = decodeContentListCursor(input.cursor);
+    const page = await this.repository.listContent({
+      limit: input.limit,
+      ...(input.status ? { status: input.status } : {}),
+      ...(before ? { before } : {}),
+    });
+    return {
+      items: page.items,
+      nextCursor: page.nextCursor
+        ? encodeContentListCursor(page.nextCursor)
+        : null,
+    };
+  }
+
+  async getContent(
+    contentId: string,
+    principal: AuthenticatedPrincipal,
+  ): Promise<ContentLifecycleRecord> {
+    await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
+    const item = await this.repository.findLifecycle(contentId);
+    if (!item) throw new ContentItemNotFoundError();
+    return item;
+  }
+
+  async listRevisions(
+    contentId: string,
+    input: { limit: number; cursor?: string },
+    principal: AuthenticatedPrincipal,
+  ): Promise<{ items: ContentRevisionSummary[]; nextCursor: string | null }> {
+    await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
+    if (!(await this.repository.findLifecycle(contentId))) {
+      throw new ContentItemNotFoundError();
+    }
+    const beforeRevisionNumber = decodeRevisionCursor(input.cursor);
+    const page: ContentRevisionListResult = await this.repository.listRevisions(
+      contentId,
+      input.limit,
+      beforeRevisionNumber,
+    );
+    return {
+      items: page.items,
+      nextCursor: page.nextCursor
+        ? encodeRevisionCursor(page.nextCursor)
+        : null,
+    };
+  }
+
+  async getRevision(
+    contentId: string,
+    revisionId: string,
+    principal: AuthenticatedPrincipal,
+  ): Promise<ContentRevisionRecord> {
+    await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
+    const revision = await this.repository.findRevision(contentId, revisionId);
+    if (!revision) throw new ContentRevisionNotFoundError();
+    return revision;
+  }
+
+  findPublishedBySlug(slug: string): Promise<PublishedContentRecord | null> {
+    return this.repository.findPublishedBySlug(normalizeContentSlug(slug));
   }
 
   private async transitionTo(

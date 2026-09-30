@@ -7,8 +7,11 @@ import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
 const testDatabaseUrl = requirePostgresTestDatabaseUrl();
 const migrationDatabase = new URL(testDatabaseUrl);
-migrationDatabase.pathname = '/stack_atlas_e2e_test';
-const databaseUrl = migrationDatabase.toString();
+migrationDatabase.pathname = '/stack_atlas_migration_test';
+const databaseUrl = requirePostgresTestDatabaseUrl({
+  ...process.env,
+  DATABASE_TEST_URL: migrationDatabase.toString(),
+});
 let pool: Pool | undefined;
 
 describe('PostgreSQL migrations', () => {
@@ -66,8 +69,39 @@ describe('PostgreSQL migrations', () => {
             'content/catalog/migrations/1790751260156-AddContentLifecycle.ts',
           migration_kind: 'schema',
         },
+        {
+          migration_name:
+            'content/catalog/migrations/1790754919694-AddContentPublicationActor.ts',
+          migration_kind: 'schema',
+        },
+        {
+          migration_name:
+            'content/catalog/migrations/1790754919880-AddContentListIndex.ts',
+          migration_kind: 'schema',
+        },
       ]),
     );
+    const publicationActor = await pool!.query<{
+      is_nullable: string;
+      data_type: string;
+    }>(
+      `SELECT is_nullable, data_type
+       FROM information_schema.columns
+       WHERE table_schema = 'stack_atlas'
+         AND table_name = 'content_publications'
+         AND column_name = 'published_by'`,
+    );
+    expect(publicationActor.rows[0]).toEqual({
+      is_nullable: 'YES',
+      data_type: 'uuid',
+    });
+    const listIndex = await pool!.query<{ index_name: string }>(
+      `SELECT indexname AS index_name
+       FROM pg_indexes
+       WHERE schemaname = 'stack_atlas'
+         AND indexname = 'content_items_created_id_desc_idx'`,
+    );
+    expect(listIndex.rowCount).toBe(1);
     const ownedTables = await pool!.query(
       `SELECT count(*)::int AS count
        FROM information_schema.tables
@@ -82,6 +116,8 @@ describe('PostgreSQL migrations', () => {
   });
 
   it('preserves published state when upgrading a legacy item with a publication pointer', async () => {
+    await runMigrations('down');
+    await runMigrations('down');
     await runMigrations('down');
     const accountId = randomUUID();
     const contentId = randomUUID();
@@ -137,6 +173,8 @@ describe('PostgreSQL migrations', () => {
       latest_revision_id: revisionId,
       published_revision_id: revisionId,
     });
+    await runMigrations('down');
+    await runMigrations('down');
     await expect(runMigrations('down')).rejects.toThrow(
       'Refusing to roll back content lifecycle metadata while content items exist',
     );
@@ -145,9 +183,60 @@ describe('PostgreSQL migrations', () => {
     await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [
       accountId,
     ]);
+    await runMigrations('up');
+  });
+
+  it('keeps publisher attribution if rolling back its column would lose audit data', async () => {
+    const accountId = randomUUID();
+    const contentId = randomUUID();
+    const revisionId = randomUUID();
+    const contentKey = `article:publisher-audit-${randomUUID()}`;
+    await pool!.query(
+      `INSERT INTO stack_atlas.users (id, email, password_hash)
+       VALUES ($1, $2, $3)`,
+      [accountId, `publisher-audit-${accountId}@example.test`, 'test-hash'],
+    );
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_items
+         (id, content_key, content_type, slug, created_by)
+       VALUES ($1, $2, 'article', $3, $4)`,
+      [contentId, contentKey, `publisher-audit-${contentId}`, accountId],
+    );
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_revisions
+         (id, content_item_id, revision_number, schema_version, document,
+          checksum_sha256, created_by)
+       VALUES ($1, $2, 1, 1, '{"schema_version":1}'::jsonb, $3, $4)`,
+      [revisionId, contentId, 'b'.repeat(64), accountId],
+    );
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_publications
+         (id, content_item_id, revision_id, published_by)
+       VALUES ($1, $2, $3, $4)`,
+      [randomUUID(), contentId, revisionId, accountId],
+    );
+
+    await runMigrations('down');
+    await expect(runMigrations('down')).rejects.toThrow(
+      'Refusing to remove recorded publication actor attribution',
+    );
+    const publication = await pool!.query<{ published_by: string }>(
+      `SELECT published_by FROM stack_atlas.content_publications
+       WHERE content_item_id = $1`,
+      [contentId],
+    );
+    expect(publication.rows[0]?.published_by).toBe(accountId);
+
+    await pool!.query('TRUNCATE stack_atlas.content_items CASCADE');
+    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [
+      accountId,
+    ]);
+    await runMigrations('up');
   });
 
   it('normalizes upgrade rows and refuses normalization collisions without data loss', async () => {
+    await runMigrations('down');
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
@@ -317,6 +406,8 @@ describe('PostgreSQL migrations', () => {
     await pool!.query(
       'CREATE TABLE stack_atlas.migration_safety_probe (id integer)',
     );
+    await runMigrations('down');
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
