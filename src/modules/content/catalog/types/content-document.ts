@@ -488,6 +488,11 @@ function safeHref(value: unknown, path: string): string {
 function safeImageSource(value: unknown, path: string): string {
   const src = boundedText(value, path, CONTENT_DOCUMENT_LIMITS_V1.maxUrlLength);
   if (!isSafeLocalPath(src)) {
+    if (!/^https:\/\//i.test(src)) {
+      throw new ContentDocumentValidationError(
+        `${path} must be a local path or HTTPS URL without credentials.`,
+      );
+    }
     let parsed: URL;
     try {
       parsed = new URL(src);
@@ -511,6 +516,7 @@ function safeImageSource(value: unknown, path: string): string {
 
 function isSafeHref(href: string): boolean {
   if (isSafeLocalPath(href) || href.startsWith('#')) return true;
+  if (!/^https?:\/\//i.test(href)) return false;
   try {
     const parsed = new URL(href);
     return (

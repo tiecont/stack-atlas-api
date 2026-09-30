@@ -5,23 +5,36 @@ import { DatabaseService } from '../../../../database/database.service';
 import type {
   CreateContentArticle,
   CreateContentRevision,
+  ContentLifecycleRecord,
   ContentRevisionRecord,
   PublishedContentRecord,
   PublishContentRevision,
+  TransitionContentStatus,
+  ContentStatus,
 } from '../types/content-catalog.types';
 import {
   ContentIdentityConflictError,
+  ContentLifecycleConflictError,
+  ContentLifecycleTransitionError,
   ContentItemNotFoundError,
   ContentRevisionConflictError,
   ContentRevisionNotFoundError,
+  ContentSlugConflictError,
 } from '../types/content-catalog.types';
 
 interface ContentRow extends QueryResultRow {
   id: string;
   content_key: string;
   content_type: 'article';
+  slug: string;
+  status: ContentStatus;
   latest_revision_id: string | null;
   published_revision_id: string | null;
+  created_by: string | null;
+  archived_at: Date | null;
+  archived_by: string | null;
+  created_at: Date;
+  updated_at: Date;
 }
 
 interface RevisionRow extends QueryResultRow {
@@ -31,6 +44,7 @@ interface RevisionRow extends QueryResultRow {
   schema_version: 1;
   checksum_sha256: string;
   document: ContentRevisionRecord['document'];
+  created_by: string | null;
   created_at: Date;
   published_at?: Date;
 }
@@ -48,10 +62,13 @@ export class ContentCatalogRepository {
       return await this.database.transaction(async (client) => {
         const contentId = randomUUID();
         const item = await client.query<ContentRow>(
-          `INSERT INTO stack_atlas.content_items (id, content_key, content_type)
-           VALUES ($1, $2, 'article')
-           RETURNING id, content_key, content_type, latest_revision_id, published_revision_id`,
-          [contentId, input.contentKey],
+          `INSERT INTO stack_atlas.content_items
+             (id, content_key, content_type, slug, created_by)
+           VALUES ($1, $2, 'article', $3, $4)
+           RETURNING id, content_key, content_type, slug, status,
+                     latest_revision_id, published_revision_id, created_by,
+                     archived_at, archived_by, created_at, updated_at`,
+          [contentId, input.contentKey, input.slug, input.actorAccountId],
         );
         const row = item.rows[0];
         if (!row)
@@ -61,20 +78,37 @@ export class ContentCatalogRepository {
         const revision = await this.insertRevision(client, {
           contentId,
           contentKey: row.content_key,
+          slug: row.slug,
+          status: row.status,
+          createdBy: row.created_by,
+          actorAccountId: input.actorAccountId,
           revisionNumber: 1,
           document: input.document,
           checksumSha256: input.checksumSha256,
         });
-        await client.query(
+        const updatedItem = await client.query<ContentRow>(
           `UPDATE stack_atlas.content_items
            SET latest_revision_id = $2, updated_at = now()
-           WHERE id = $1`,
+           WHERE id = $1
+           RETURNING id, content_key, content_type, slug, status,
+                     latest_revision_id, published_revision_id, created_by,
+                     archived_at, archived_by, created_at, updated_at`,
           [contentId, revision.revisionId],
         );
+        if (!updatedItem.rows[0]) {
+          throw new Error(
+            'PostgreSQL did not return the updated content item.',
+          );
+        }
         return revision;
       });
     } catch (error) {
-      if (isUniqueViolation(error)) throw new ContentIdentityConflictError();
+      if (isUniqueViolation(error)) {
+        if (uniqueConstraint(error) === 'content_items_active_slug_unique') {
+          throw new ContentSlugConflictError();
+        }
+        throw new ContentIdentityConflictError();
+      }
       throw error;
     }
   }
@@ -82,6 +116,9 @@ export class ContentCatalogRepository {
   appendRevision(input: CreateContentRevision): Promise<ContentRevisionRecord> {
     return this.database.transaction(async (client) => {
       const item = await this.lockContentItem(client, input.contentId);
+      if (item.status !== 'DRAFT') {
+        throw new ContentLifecycleTransitionError();
+      }
       if (item.latest_revision_id !== input.baseRevisionId) {
         throw new ContentRevisionConflictError();
       }
@@ -102,6 +139,10 @@ export class ContentCatalogRepository {
       const revision = await this.insertRevision(client, {
         contentId: item.id,
         contentKey: item.content_key,
+        slug: item.slug,
+        status: item.status,
+        createdBy: item.created_by,
+        actorAccountId: input.actorAccountId,
         revisionNumber: latestRevisionNumber + 1,
         document: input.document,
         checksumSha256: input.checksumSha256,
@@ -125,12 +166,17 @@ export class ContentCatalogRepository {
         content_item_id: string;
         content_key: string;
         content_type: 'article';
+        slug: string;
+        status: ContentStatus;
+        item_created_by: string | null;
       }) &
         QueryResultRow
     >(
       `SELECT item.id AS content_item_id, item.content_key, item.content_type,
+              item.slug, item.status, item.created_by AS item_created_by,
               revision.id, revision.content_item_id, revision.revision_number,
               revision.schema_version, revision.checksum_sha256, revision.document,
+              revision.created_by,
               revision.created_at
        FROM stack_atlas.content_items AS item
        JOIN stack_atlas.content_revisions AS revision
@@ -145,8 +191,9 @@ export class ContentCatalogRepository {
         id: row.content_item_id,
         content_key: row.content_key,
         content_type: row.content_type,
-        latest_revision_id: null,
-        published_revision_id: null,
+        slug: row.slug,
+        status: row.status,
+        created_by: row.item_created_by,
       },
       row,
     );
@@ -157,9 +204,15 @@ export class ContentCatalogRepository {
   ): Promise<PublishedContentRecord> {
     return this.database.transaction(async (client) => {
       const item = await this.lockContentItem(client, input.contentId);
+      if (item.status !== input.expectedStatus) {
+        throw new ContentLifecycleConflictError();
+      }
+      if (item.status !== 'IN_REVIEW') {
+        throw new ContentLifecycleTransitionError();
+      }
       const revision = await client.query<RevisionRow>(
         `SELECT id, content_item_id, revision_number, schema_version,
-                checksum_sha256, document, created_at
+                checksum_sha256, document, created_by, created_at
          FROM stack_atlas.content_revisions
          WHERE id = $1 AND content_item_id = $2`,
         [input.revisionId, item.id],
@@ -178,13 +231,18 @@ export class ContentCatalogRepository {
       const publishedAt = publication.rows[0]?.published_at;
       if (!publishedAt)
         throw new Error('PostgreSQL did not return the publication timestamp.');
-      await client.query(
+      const updatedItem = await client.query<ContentRow>(
         `UPDATE stack_atlas.content_items
-         SET published_revision_id = $2, updated_at = now()
-         WHERE id = $1`,
+         SET published_revision_id = $2, status = 'PUBLISHED', updated_at = now()
+         WHERE id = $1 AND status = 'IN_REVIEW'
+         RETURNING id, content_key, content_type, slug, status,
+                   latest_revision_id, published_revision_id, created_by,
+                   archived_at, archived_by, created_at, updated_at`,
         [item.id, row.id],
       );
-      return { ...mapRevision(item, row), publishedAt };
+      const publishedItem = updatedItem.rows[0];
+      if (!publishedItem) throw new ContentLifecycleConflictError();
+      return { ...mapRevision(publishedItem, row), publishedAt };
     });
   }
 
@@ -196,13 +254,17 @@ export class ContentCatalogRepository {
         content_id: string;
         content_key: string;
         content_type: 'article';
+        slug: string;
+        status: ContentStatus;
+        item_created_by: string | null;
       }) &
         QueryResultRow
     >(
       `SELECT item.id AS content_id, item.content_key, item.content_type,
+              item.slug, item.status, item.created_by AS item_created_by,
               revision.id, revision.content_item_id, revision.revision_number,
               revision.schema_version, revision.checksum_sha256, revision.document,
-              revision.created_at, publication.published_at
+              revision.created_by, revision.created_at, publication.published_at
        FROM stack_atlas.content_items AS item
        JOIN stack_atlas.content_revisions AS revision
          ON revision.id = item.published_revision_id
@@ -214,7 +276,7 @@ export class ContentCatalogRepository {
          ORDER BY published_at DESC
          LIMIT 1
        ) AS publication ON true
-       WHERE item.content_key = $1`,
+       WHERE item.content_key = $1 AND item.archived_at IS NULL`,
       [contentKey],
     );
     const row = result.rows[0];
@@ -225,8 +287,9 @@ export class ContentCatalogRepository {
           id: row.content_id,
           content_key: row.content_key,
           content_type: row.content_type,
-          latest_revision_id: null,
-          published_revision_id: row.id,
+          slug: row.slug,
+          status: row.status,
+          created_by: row.item_created_by,
         },
         row,
       ),
@@ -234,12 +297,73 @@ export class ContentCatalogRepository {
     };
   }
 
+  async findLifecycle(
+    contentId: string,
+  ): Promise<ContentLifecycleRecord | null> {
+    const result = await this.database.query<ContentRow>(
+      `SELECT id, content_key, content_type, slug, status,
+              latest_revision_id, published_revision_id, created_by,
+              archived_at, archived_by, created_at, updated_at
+       FROM stack_atlas.content_items
+       WHERE id = $1`,
+      [contentId],
+    );
+    const item = result.rows[0];
+    return item ? mapLifecycle(item) : null;
+  }
+
+  async transitionStatus(
+    input: TransitionContentStatus,
+  ): Promise<ContentLifecycleRecord> {
+    try {
+      return await this.database.transaction(async (client) => {
+        const item = await this.lockContentItem(client, input.contentId);
+        if (item.status !== input.expectedStatus) {
+          throw new ContentLifecycleConflictError();
+        }
+        if (input.nextStatus === 'PUBLISHED') {
+          throw new ContentLifecycleTransitionError();
+        }
+        const result = await client.query<ContentRow>(
+          `UPDATE stack_atlas.content_items
+           SET status = $2,
+               archived_at = CASE WHEN $2 = 'ARCHIVED' THEN now() ELSE NULL END,
+               archived_by = CASE WHEN $2 = 'ARCHIVED' THEN $3::uuid ELSE NULL END,
+               updated_at = now()
+           WHERE id = $1 AND status = $4
+           RETURNING id, content_key, content_type, slug, status,
+                     latest_revision_id, published_revision_id, created_by,
+                     archived_at, archived_by, created_at, updated_at`,
+          [
+            input.contentId,
+            input.nextStatus,
+            input.actorAccountId,
+            input.expectedStatus,
+          ],
+        );
+        const updated = result.rows[0];
+        if (!updated) throw new ContentLifecycleConflictError();
+        return mapLifecycle(updated);
+      });
+    } catch (error) {
+      if (
+        isUniqueViolation(error) &&
+        uniqueConstraint(error) === 'content_items_active_slug_unique'
+      ) {
+        throw new ContentSlugConflictError();
+      }
+      throw error;
+    }
+  }
+
   private async lockContentItem(
     client: PoolClient,
     contentId: string,
   ): Promise<ContentRow> {
     const result = await client.query<ContentRow>(
-      `SELECT id, content_key, content_type, latest_revision_id, published_revision_id
+      `SELECT id, content_key, content_type, slug, status,
+              latest_revision_id, published_revision_id, created_by,
+              archived_at, archived_by, created_at, updated_at
        FROM stack_atlas.content_items
        WHERE id = $1
        FOR UPDATE`,
@@ -255,6 +379,10 @@ export class ContentCatalogRepository {
     input: {
       contentId: string;
       contentKey: string;
+      slug: string;
+      status: ContentStatus;
+      createdBy: string | null;
+      actorAccountId: string;
       revisionNumber: number;
       document: ContentRevisionRecord['document'];
       checksumSha256: string;
@@ -263,16 +391,18 @@ export class ContentCatalogRepository {
     const revisionId = randomUUID();
     const result = await client.query<RevisionRow>(
       `INSERT INTO stack_atlas.content_revisions
-         (id, content_item_id, revision_number, schema_version, document, checksum_sha256)
-       VALUES ($1, $2, $3, 1, $4::jsonb, $5)
+         (id, content_item_id, revision_number, schema_version, document,
+          checksum_sha256, created_by)
+       VALUES ($1, $2, $3, 1, $4::jsonb, $5, $6)
        RETURNING id, content_item_id, revision_number, schema_version,
-                 checksum_sha256, document, created_at`,
+                 checksum_sha256, document, created_by, created_at`,
       [
         revisionId,
         input.contentId,
         input.revisionNumber,
         JSON.stringify(input.document),
         input.checksumSha256,
+        input.actorAccountId,
       ],
     );
     const row = result.rows[0];
@@ -285,8 +415,9 @@ export class ContentCatalogRepository {
         id: input.contentId,
         content_key: input.contentKey,
         content_type: 'article',
-        latest_revision_id: null,
-        published_revision_id: null,
+        slug: input.slug,
+        status: input.status,
+        created_by: input.createdBy,
       },
       row,
     );
@@ -294,19 +425,42 @@ export class ContentCatalogRepository {
 }
 
 function mapRevision(
-  item: ContentRow,
+  item: Pick<
+    ContentRow,
+    'id' | 'content_key' | 'content_type' | 'slug' | 'status' | 'created_by'
+  >,
   revision: RevisionRow,
 ): ContentRevisionRecord {
   return {
     contentId: item.id,
     contentKey: item.content_key,
+    slug: item.slug,
+    status: item.status,
     contentType: item.content_type,
+    createdBy: item.created_by,
+    revisionCreatedBy: revision.created_by,
     revisionId: revision.id,
     revisionNumber: revision.revision_number,
     schemaVersion: 1,
     checksumSha256: revision.checksum_sha256,
     document: revision.document,
     createdAt: revision.created_at,
+  };
+}
+
+function mapLifecycle(item: ContentRow): ContentLifecycleRecord {
+  return {
+    contentId: item.id,
+    contentKey: item.content_key,
+    slug: item.slug,
+    status: item.status,
+    latestRevisionId: item.latest_revision_id,
+    publishedRevisionId: item.published_revision_id,
+    createdBy: item.created_by,
+    archivedAt: item.archived_at,
+    archivedBy: item.archived_by,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
   };
 }
 
@@ -317,4 +471,13 @@ function isUniqueViolation(error: unknown): boolean {
     'code' in error &&
     error.code === '23505'
   );
+}
+
+function uniqueConstraint(error: unknown): string | null {
+  return typeof error === 'object' &&
+    error !== null &&
+    'constraint' in error &&
+    typeof error.constraint === 'string'
+    ? error.constraint
+    : null;
 }

@@ -15,8 +15,31 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 
 - `content_key` is a stable, unique, lowercase key such as
   `article:transactional-outbox`.
+- `slug` is the route identity. It is normalized to lowercase, uses URL-safe
+  slash-separated segments, is at most 255 characters, and cannot contain
+  empty segments, `..`, or a reserved first segment (`api`, `admin`, `login`,
+  `register`, `account`, or `_next`). Whitespace becomes a hyphen; whitespace
+  around `/` is removed. Only non-archived items reserve a slug.
 - V1 persists article content only. Other content kinds need an explicit schema
   before they are added.
+- Lifecycle is `DRAFT`, `IN_REVIEW`, `PUBLISHED`, or `ARCHIVED`. Allowed
+  transitions are `DRAFT -> IN_REVIEW`, `IN_REVIEW -> DRAFT`,
+  `IN_REVIEW -> PUBLISHED`, `PUBLISHED -> DRAFT`, any non-archived state to
+  `ARCHIVED`, and `ARCHIVED -> DRAFT`. Publishing is a dedicated operation so
+  publication history and the published pointer change atomically.
+- Revision append is allowed only in `DRAFT`. Publishing is allowed only from
+  `IN_REVIEW`. Archive and restore require `content:archive`; the other
+  workflow transitions require `content:update`.
+- Archiving sets `archived_at` and `archived_by`, hides the item from published
+  lookup, and preserves its revisions, publication history, and pointers.
+  Restoring returns the item to `DRAFT`, clears archive metadata, and can fail
+  with a slug conflict if another active item now owns that route.
+- New item creation and revisions record the authenticated principal's account
+  as creator. Archive records the authenticated archiver. Actor IDs never come
+  from content input. Existing rows receive a deterministic `legacy-<uuid>`
+  slug; items with a published revision pointer retain `PUBLISHED` state, and
+  other legacy items become `DRAFT`. Historical creator fields remain nullable
+  because their actors cannot be reconstructed.
 - Revisions are append-only and numbered per content identity.
 - Appending a revision requires the caller's `baseRevisionId`. The repository
   locks the content identity and compares it with `latest_revision_id` before
@@ -26,8 +49,8 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 - A revision stores a validated document and SHA-256 checksum of canonical JSON.
 - Publication history is append-only. The current published revision points to
   one immutable revision belonging to the same content identity.
-- Authoring HTTP routes, admin permissions, and Git import/cutover are not part
-  of this foundation.
+- Git import/cutover is not part of this foundation. Lifecycle commands check
+  current platform permissions, while HTTP routes remain out of scope.
 
 ## Document
 
@@ -69,11 +92,12 @@ or hyphens. The block version is exactly `1`.
 
 The heading anchor is the optional `props.anchor`; the block `id` is never used
 as a heading anchor. Validators reject unknown block types, versions, and
-fields. Image sources must be local paths or HTTPS URLs. Rich-text and related
-content links may be local paths, fragments, or HTTP(S) URLs. URL credentials,
-protocol-relative URLs, and executable schemes are rejected. Text is rendered
-as text by Web's React renderer; authored HTML is not accepted by this contract.
-The canonical fixture includes all eight block types.
+fields. Image sources must be local paths or absolute `https://` URLs.
+Rich-text and related content links may be local paths, fragments, or absolute
+`http://` and `https://` URLs. Malformed absolute URLs such as `https:example.com`,
+URL credentials, protocol-relative URLs, and executable schemes are rejected.
+Text is rendered as text by Web's React renderer; authored HTML is not accepted
+by this contract. The canonical fixture includes all eight block types.
 
 V1 limits use UTF-8 byte size for the whole compact JSON document and code
 source. Other text and identifiers use string length. The API validator and
@@ -97,13 +121,24 @@ Web renderer apply the same limits:
   owning content identity.
 - The database rejects updates or deletes to revision and publication rows.
 - The database rejects changes to a content item's identity fields.
+- The database validates slug shape, reserved route roots, lifecycle values,
+  archive metadata consistency, and creator foreign keys. A partial unique
+  index prevents active slug collisions while allowing an archived route to be
+  reused.
+- Item and revision creator attribution is immutable. Creator fields are
+  nullable only for rows that predate lifecycle attribution.
 - Creating a revision and moving the latest-revision pointer share one
-  transaction. `baseRevisionId` is compared while holding a row lock; stale
-  writes fail with `ContentRevisionConflictError` and create no revision.
+  transaction. The item row lock checks `DRAFT` state and compares
+  `baseRevisionId`; stale writes fail with `ContentRevisionConflictError` and
+  create no revision.
 - Publishing a revision, recording publication history, and moving the
-  published-revision pointer share one transaction.
+  published-revision pointer and `PUBLISHED` state share one transaction.
 - Publication validates a complete V1 document before persistence through the
   content service.
+- State transitions lock the content item and compare the previously observed
+  status before writing. Archive and restore never delete or rewrite revisions
+  or publication rows.
 
 There is no public or administrative HTTP endpoint in this foundation. The
-service and repository are the persistence boundary for the authoring phase.
+permission-aware service and repository are the persistence boundary for the
+authoring phase.

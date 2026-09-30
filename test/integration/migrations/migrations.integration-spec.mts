@@ -5,7 +5,10 @@ import { DatabaseService } from '../../../src/database/database.service.js';
 import { migrate } from '../../../scripts/migrations/runner.mjs';
 import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
-const databaseUrl = requirePostgresTestDatabaseUrl();
+const testDatabaseUrl = requirePostgresTestDatabaseUrl();
+const migrationDatabase = new URL(testDatabaseUrl);
+migrationDatabase.pathname = '/stack_atlas_e2e_test';
+const databaseUrl = migrationDatabase.toString();
 let pool: Pool | undefined;
 
 describe('PostgreSQL migrations', () => {
@@ -58,6 +61,11 @@ describe('PostgreSQL migrations', () => {
             'identity/platform-authorization/migrations/1790747319761-PlatformAuthorization.ts',
           migration_kind: 'schema',
         },
+        {
+          migration_name:
+            'content/catalog/migrations/1790751260156-AddContentLifecycle.ts',
+          migration_kind: 'schema',
+        },
       ]),
     );
     const ownedTables = await pool!.query(
@@ -73,7 +81,74 @@ describe('PostgreSQL migrations', () => {
     expect(ownedTables.rows[0]?.count).toBe(8);
   });
 
+  it('preserves published state when upgrading a legacy item with a publication pointer', async () => {
+    await runMigrations('down');
+    const accountId = randomUUID();
+    const contentId = randomUUID();
+    const revisionId = randomUUID();
+    const contentKey = `article:legacy-${randomUUID()}`;
+
+    await pool!.query(
+      `INSERT INTO stack_atlas.users (id, email, password_hash)
+       VALUES ($1, $2, $3)`,
+      [
+        accountId,
+        `legacy-content-${accountId}@example.test`,
+        'migration-test-hash',
+      ],
+    );
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_items (id, content_key, content_type)
+       VALUES ($1, $2, 'article')`,
+      [contentId, contentKey],
+    );
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_revisions
+         (id, content_item_id, revision_number, schema_version, document, checksum_sha256)
+       VALUES ($1, $2, 1, 1, '{"schema_version":1}'::jsonb, $3)`,
+      [revisionId, contentId, 'a'.repeat(64)],
+    );
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_publications (id, content_item_id, revision_id)
+       VALUES ($1, $2, $3)`,
+      [randomUUID(), contentId, revisionId],
+    );
+    await pool!.query(
+      `UPDATE stack_atlas.content_items
+       SET latest_revision_id = $2, published_revision_id = $2
+       WHERE id = $1`,
+      [contentId, revisionId],
+    );
+
+    await runMigrations('up');
+    const upgraded = await pool!.query<{
+      slug: string;
+      status: string;
+      latest_revision_id: string;
+      published_revision_id: string;
+    }>(
+      `SELECT slug, status, latest_revision_id, published_revision_id
+       FROM stack_atlas.content_items WHERE id = $1`,
+      [contentId],
+    );
+    expect(upgraded.rows[0]).toEqual({
+      slug: `legacy-${contentId.replaceAll('-', '')}`,
+      status: 'PUBLISHED',
+      latest_revision_id: revisionId,
+      published_revision_id: revisionId,
+    });
+    await expect(runMigrations('down')).rejects.toThrow(
+      'Refusing to roll back content lifecycle metadata while content items exist',
+    );
+
+    await pool!.query('TRUNCATE stack_atlas.content_items CASCADE');
+    await pool!.query('DELETE FROM stack_atlas.users WHERE id = $1', [
+      accountId,
+    ]);
+  });
+
   it('normalizes upgrade rows and refuses normalization collisions without data loss', async () => {
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
@@ -242,6 +317,7 @@ describe('PostgreSQL migrations', () => {
     await pool!.query(
       'CREATE TABLE stack_atlas.migration_safety_probe (id integer)',
     );
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');

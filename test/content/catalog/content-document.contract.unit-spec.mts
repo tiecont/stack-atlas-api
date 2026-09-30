@@ -202,6 +202,37 @@ describe('Content Document V1 contract', () => {
     expect(() => validateContentDocument(protocolRelativeImage)).toThrow(
       'document.blocks[4].props.src must be a local path or HTTPS URL without credentials.',
     );
+
+    const malformedAbsoluteLink = cloneFixture();
+    setRichTextChildren(malformedAbsoluteLink, [
+      {
+        type: 'link',
+        href: 'https:example.com/path',
+        children: [{ type: 'text', text: 'malformed' }],
+      },
+    ]);
+    expect(() => validateContentDocument(malformedAbsoluteLink)).toThrow(
+      'document.blocks[0].props.nodes[0].children[0].href must be a local path, fragment, or HTTP(S) URL without credentials.',
+    );
+
+    const malformedAbsoluteImage = cloneFixture();
+    malformedAbsoluteImage.blocks[4]!.props['src'] =
+      'https:example.com/image.png';
+    expect(() => validateContentDocument(malformedAbsoluteImage)).toThrow(
+      'document.blocks[4].props.src must be a local path or HTTPS URL without credentials.',
+    );
+
+    const executableLink = cloneFixture();
+    setRichTextChildren(executableLink, [
+      {
+        type: 'link',
+        href: 'vbscript:msgbox(1)',
+        children: [{ type: 'text', text: 'unsafe' }],
+      },
+    ]);
+    expect(() => validateContentDocument(executableLink)).toThrow(
+      'document.blocks[0].props.nodes[0].children[0].href must be a local path, fragment, or HTTP(S) URL without credentials.',
+    );
   });
 
   it('enforces document, block-count, id, nesting, code-byte, and URL limits', () => {

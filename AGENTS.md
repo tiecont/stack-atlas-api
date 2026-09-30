@@ -136,6 +136,16 @@ stale-editor conflict with no extra revision and one-winner/one-conflict
 behavior for concurrent appends from the same base, including the latest
 pointer and revision count.
 
+Content lifecycle is `DRAFT`, `IN_REVIEW`, `PUBLISHED`, or `ARCHIVED`; use the
+central transition policy in the catalog service. Revision append is allowed
+only in `DRAFT`, publication only from `IN_REVIEW`, and archive hides content
+from public lookup without deleting revisions or publication history. Resolve
+`created_by`, revision creator, and archive actor from `AuthenticatedPrincipal`;
+never accept actor IDs from content input. Slugs must follow
+`docs/contracts/content-v1.md`, protect reserved route roots, and be unique for
+non-archived content. Keep lifecycle operations behind current typed platform
+permissions even while their HTTP controllers remain unexposed.
+
 ## 4. Authorization and learning invariants
 
 ### AUTH-001 — Server-authoritative ownership
