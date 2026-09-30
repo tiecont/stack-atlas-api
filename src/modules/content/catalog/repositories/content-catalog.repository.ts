@@ -82,7 +82,7 @@ export class ContentCatalogRepository {
   appendRevision(input: CreateContentRevision): Promise<ContentRevisionRecord> {
     return this.database.transaction(async (client) => {
       const item = await this.lockContentItem(client, input.contentId);
-      if (item.latest_revision_id !== input.expectedLatestRevisionId) {
+      if (item.latest_revision_id !== input.baseRevisionId) {
         throw new ContentRevisionConflictError();
       }
       const current = await client.query<

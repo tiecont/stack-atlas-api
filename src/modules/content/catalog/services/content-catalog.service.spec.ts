@@ -113,7 +113,7 @@ describe('ContentCatalogService', () => {
 
     expect(repository.appendRevision).toHaveBeenCalledWith({
       contentId: 'content-id',
-      expectedLatestRevisionId: 'revision-12',
+      baseRevisionId: 'revision-12',
       document,
       checksumSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });

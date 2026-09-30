@@ -45,6 +45,31 @@ describe('PostgreSQL content catalog', () => {
     expect(second.revisionNumber).toBe(2);
     expect(second.revisionId).not.toBe(first.revisionId);
     expect(firstPublication.revisionId).toBe(first.revisionId);
+
+    await expect(
+      service.appendRevision(
+        first.contentId,
+        first.revisionId,
+        makeDocument('Editor B stale write'),
+      ),
+    ).rejects.toBeInstanceOf(ContentRevisionConflictError);
+    const stateAfterStaleWrite = await pool!.query<{
+      latest_revision_id: string;
+      revision_count: string;
+    }>(
+      `SELECT item.latest_revision_id, count(revision.id)::text AS revision_count
+       FROM stack_atlas.content_items AS item
+       JOIN stack_atlas.content_revisions AS revision
+         ON revision.content_item_id = item.id
+       WHERE item.id = $1
+       GROUP BY item.id`,
+      [first.contentId],
+    );
+    expect(stateAfterStaleWrite.rows[0]?.latest_revision_id).toBe(
+      second.revisionId,
+    );
+    expect(stateAfterStaleWrite.rows[0]?.revision_count).toBe('2');
+
     expect((await service.findPublishedByKey(contentKey))?.revisionNumber).toBe(
       1,
     );
@@ -97,6 +122,16 @@ describe('PostgreSQL content catalog', () => {
       [first.contentId],
     );
     expect(revisionCount.rows[0]?.count).toBe('3');
+    const revisionNumbers = await pool!.query<{ revision_number: number }>(
+      `SELECT revision_number
+       FROM stack_atlas.content_revisions
+       WHERE content_item_id = $1
+       ORDER BY revision_number`,
+      [first.contentId],
+    );
+    expect(revisionNumbers.rows.map((row) => row.revision_number)).toEqual([
+      1, 2, 3,
+    ]);
 
     await expect(
       pool!.query(
