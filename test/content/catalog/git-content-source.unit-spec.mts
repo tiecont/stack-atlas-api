@@ -64,7 +64,7 @@ describe('Git content source parser', () => {
       ]),
     );
     expect(blocks.find((block) => block.type === 'heading')).toMatchObject({
-      props: { level: 2, anchor: 'intro', text: 'Introduction' },
+      props: { level: 2, anchor: 'introduction', text: 'Introduction' },
     });
     expect(blocks.find((block) => block.type === 'image')).toMatchObject({
       props: { src: '/images/diagram.png', alt: 'Architecture diagram' },
@@ -78,6 +78,34 @@ describe('Git content source parser', () => {
     expect(source?.warnings.map((warning) => warning.code)).toContain(
       'svg_diagram_preserved_as_code',
     );
+  });
+
+  it('matches Web heading anchors without inheriting section ids', async () => {
+    const root = createSourceCheckout(
+      [
+        '<section id="aggregate"><h2>Aggregate</h2><h3>Aggregate</h3></section>',
+        '<div id="collision"></div><h2>Collision</h2>',
+        '<h2 id="explicit-anchor">Explicit</h2>',
+        '<h2>Ưu điểm</h2>',
+        '<h4 id="subsection">Details</h4>',
+      ].join(''),
+    );
+    const snapshot = await parseGitContentSnapshot(root);
+    const source = snapshot.articles.find(
+      (article) => article.sourceId === 'source-article',
+    );
+    const headings = source?.document?.blocks.filter(
+      (block) => block.type === 'heading',
+    );
+
+    expect(headings?.map((block) => block.props)).toEqual([
+      { level: 2, anchor: 'aggregate-2', text: 'Aggregate' },
+      { level: 3, anchor: 'aggregate-3', text: 'Aggregate' },
+      { level: 2, anchor: 'collision-2', text: 'Collision' },
+      { level: 2, anchor: 'explicit-anchor', text: 'Explicit' },
+      { level: 2, anchor: 'uu-điem', text: 'Ưu điểm' },
+      { level: 4, anchor: 'subsection', text: 'Details' },
+    ]);
   });
 
   it('reports an unsafe link and refuses to produce an importable document', async () => {

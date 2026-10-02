@@ -97,8 +97,11 @@ to 128 characters, using lowercase letters, digits, dots, underscores, colons,
 or hyphens. The block version is exactly `1`.
 
 The heading anchor is the optional `props.anchor`; the block `id` is never used
-as a heading anchor. Validators reject unknown block types, versions, and
-fields. Image sources must be local paths or absolute `https://` URLs.
+as a heading anchor. Anchors are at most 120 lowercase Unicode letters or
+digits separated by hyphens. This preserves existing Web-generated fragment
+IDs, including Vietnamese headings. Validators reject unknown block types,
+versions, and fields. Image sources must be local paths or absolute `https://`
+URLs.
 Rich-text and related content links may be local paths, fragments, or absolute
 `http://` and `https://` URLs. Malformed absolute URLs such as `https:example.com`,
 URL credentials, protocol-relative URLs, and executable schemes are rejected.

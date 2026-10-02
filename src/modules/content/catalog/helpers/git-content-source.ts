@@ -12,6 +12,7 @@ import type {
   RichTextNodeV1,
 } from '../types/content-document';
 import {
+  isValidHeadingAnchorV1,
   validateContentDocument,
   validateContentKey,
 } from '../types/content-document';
@@ -89,7 +90,7 @@ interface ConversionContext {
   sourceId: string;
   sourcePath: string;
   slug: string;
-  anchors: Set<string>;
+  headingAnchors: Map<HtmlElement, string>;
   parser: HtmlParser;
 }
 
@@ -681,6 +682,7 @@ function convertArticleHtml(
   warnings: GitContentImportIssue[];
   errors: GitContentImportIssue[];
 } {
+  const fragment = parser.parseFragment(html, { sourceCodeLocationInfo: true });
   const context: ConversionContext = {
     blocks: [],
     warnings: [],
@@ -688,12 +690,11 @@ function convertArticleHtml(
     sourceId,
     sourcePath,
     slug,
-    anchors: new Set(),
+    headingAnchors: deriveWebHeadingAnchors(fragment),
     parser,
   };
-  const fragment = parser.parseFragment(html, { sourceCodeLocationInfo: true });
   auditHtmlTree(fragment, context);
-  walkChildren(fragment.childNodes, 'root', undefined, context);
+  walkChildren(fragment.childNodes, 'root', context);
   return {
     blocks: context.blocks,
     warnings: context.warnings,
@@ -704,7 +705,6 @@ function convertArticleHtml(
 function walkChildren(
   nodes: HtmlNode[],
   parentPath: string,
-  inheritedAnchor: string | undefined,
   context: ConversionContext,
 ): void {
   for (let index = 0; index < nodes.length; index += 1) {
@@ -719,8 +719,6 @@ function walkChildren(
     }
     if (!isElement(node)) continue;
     const tag = node.tagName.toLowerCase();
-    const anchor = getAttribute(node, 'id') ?? inheritedAnchor;
-
     if (hasClass(node, 'code-label')) {
       const next = nextMeaningfulNode(nodes, index + 1);
       if (
@@ -755,17 +753,12 @@ function walkChildren(
     }
 
     if (tag === 'section') {
-      walkChildren(
-        node.childNodes,
-        nodePath,
-        getAttribute(node, 'id') ?? inheritedAnchor,
-        context,
-      );
+      walkChildren(node.childNodes, nodePath, context);
     } else if (tag === 'h2' || tag === 'h3' || tag === 'h4') {
       addHeading(
         node,
         Number(tag.slice(1)) as 2 | 3 | 4,
-        anchor,
+        context.headingAnchors.get(node),
         nodePath,
         context,
       );
@@ -835,7 +828,7 @@ function walkChildren(
           ),
         );
       }
-      walkChildren(node.childNodes, nodePath, anchor, context);
+      walkChildren(node.childNodes, nodePath, context);
     } else if (
       tag === 'a' ||
       tag === 'span' ||
@@ -856,9 +849,64 @@ function walkChildren(
           context.sourcePath,
         ),
       );
-      walkChildren(node.childNodes, nodePath, anchor, context);
+      walkChildren(node.childNodes, nodePath, context);
     }
   }
+}
+
+function deriveWebHeadingAnchors(
+  fragment: DefaultTreeAdapterTypes.DocumentFragment,
+): Map<HtmlElement, string> {
+  const elements: HtmlElement[] = [];
+  const visit = (node: HtmlNode): void => {
+    if (isElement(node)) elements.push(node);
+    if ('childNodes' in node) node.childNodes.forEach(visit);
+  };
+  fragment.childNodes.forEach(visit);
+
+  const reserved = new Set(
+    elements.flatMap((element) => {
+      const id = getAttribute(element, 'id');
+      return id ? [id] : [];
+    }),
+  );
+  const counts = new Map<string, number>();
+  const anchors = new Map<HtmlElement, string>();
+
+  for (const element of elements) {
+    const tag = element.tagName.toLowerCase();
+    const existingId = getAttribute(element, 'id');
+    if (tag === 'h4') {
+      if (existingId) anchors.set(element, existingId);
+      continue;
+    }
+    if (tag !== 'h2' && tag !== 'h3') continue;
+    if (existingId) {
+      anchors.set(element, existingId);
+      continue;
+    }
+
+    const base =
+      webHeadingSlug(collapseWhitespace(textContent(element))) || 'section';
+    let suffix = counts.get(base) ?? 1;
+    let candidate = base;
+    while (reserved.has(candidate)) candidate = `${base}-${++suffix}`;
+    counts.set(base, suffix);
+    reserved.add(candidate);
+    anchors.set(element, candidate);
+  }
+
+  return anchors;
+}
+
+function webHeadingSlug(value: string): string {
+  return value
+    .normalize('NFKD')
+    .toLowerCase()
+    .trim()
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 function auditElement(element: HtmlElement, context: ConversionContext): void {
@@ -913,27 +961,15 @@ function addHeading(
 ): void {
   const text = collapseWhitespace(textContent(element));
   if (!text) return;
-  const anchor = sourceAnchor?.toLowerCase();
   let acceptedAnchor: string | undefined;
-  if (anchor) {
-    if (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(anchor) && anchor.length <= 120) {
-      if (context.anchors.has(anchor)) {
-        context.warnings.push(
-          issue(
-            'duplicate_heading_anchor',
-            `Duplicate heading anchor ${anchor} was omitted.`,
-            context.sourcePath,
-          ),
-        );
-      } else {
-        acceptedAnchor = anchor;
-        context.anchors.add(anchor);
-      }
+  if (sourceAnchor) {
+    if (isValidHeadingAnchorV1(sourceAnchor)) {
+      acceptedAnchor = sourceAnchor;
     } else {
       context.warnings.push(
         issue(
           'invalid_heading_anchor',
-          `Source anchor ${anchor} is not valid in Content Document V1 and was omitted.`,
+          `Source anchor ${sourceAnchor} is not valid in Content Document V1 and was omitted.`,
           context.sourcePath,
         ),
       );
