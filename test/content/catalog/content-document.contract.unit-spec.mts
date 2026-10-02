@@ -60,6 +60,25 @@ describe('Content Document V1 contract', () => {
     });
   });
 
+  it('preserves lowercase Unicode heading anchors from existing article URLs', () => {
+    const document = cloneFixture();
+    document.blocks[1]!.props['anchor'] = 'uu-điem';
+
+    expect(validateContentDocument(document).blocks[1]).toMatchObject({
+      type: 'heading',
+      props: { anchor: 'uu-điem' },
+    });
+  });
+
+  it('rejects uppercase characters in heading anchors', () => {
+    const document = cloneFixture();
+    document.blocks[1]!.props['anchor'] = 'Uu-điem';
+
+    expect(() => validateContentDocument(document)).toThrow(
+      'document.blocks[1].props.anchor must contain lowercase Unicode letters or digits separated by hyphens.',
+    );
+  });
+
   it('keeps paragraphs, lists, and inline formatting inside rich_text.props.nodes', () => {
     const legacyDocument = {
       schema_version: 1,

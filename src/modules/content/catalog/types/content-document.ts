@@ -58,7 +58,7 @@ export class ContentDocumentValidationError extends Error {
 
 const CONTENT_KEY_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,254}$/;
 const BLOCK_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
-const HEADING_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const HEADING_ID_PATTERN = /^[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*$/u;
 
 export const CONTENT_DOCUMENT_LIMITS_V1 = Object.freeze({
   maxDocumentBytes: 1_048_576,
@@ -71,6 +71,14 @@ export const CONTENT_DOCUMENT_LIMITS_V1 = Object.freeze({
   maxRelatedItems: 20,
   maxUrlLength: 2048,
 });
+
+export function isValidHeadingAnchorV1(value: string): boolean {
+  return (
+    value.length <= 120 &&
+    value === value.toLowerCase() &&
+    HEADING_ID_PATTERN.test(value)
+  );
+}
 
 export function validateContentKey(contentKey: string): string {
   if (!CONTENT_KEY_PATTERN.test(contentKey)) {
@@ -167,12 +175,10 @@ function validateBlock(value: unknown, path: string): ContentBlockV1 {
       const anchor = props['anchor'];
       if (
         anchor !== undefined &&
-        (typeof anchor !== 'string' ||
-          anchor.length > 120 ||
-          !HEADING_ID_PATTERN.test(anchor))
+        (typeof anchor !== 'string' || !isValidHeadingAnchorV1(anchor))
       ) {
         throw new ContentDocumentValidationError(
-          `${path}.props.anchor must be a lowercase hyphenated heading anchor.`,
+          `${path}.props.anchor must contain lowercase Unicode letters or digits separated by hyphens.`,
         );
       }
       return {
