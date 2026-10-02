@@ -7,6 +7,7 @@ import {
   CONTENT_STATUS,
   ContentLifecycleTransitionError,
   ContentPermissionDeniedError,
+  ContentSearchValidationError,
 } from '../types/content-catalog.types';
 import { ContentDocumentValidationError } from '../types/content-document';
 import type { AuthenticatedPrincipal } from '../../../identity/authentication/types/authenticated-principal';
@@ -53,6 +54,7 @@ function createRepository() {
     publishRevision: vi.fn(),
     findPublishedByKey: vi.fn(),
     findPublishedBySlug: vi.fn(),
+    searchPublishedContent: vi.fn(),
     findLifecycle: vi.fn(),
     transitionStatus: vi.fn(),
     listContent: vi.fn(),
@@ -67,6 +69,7 @@ function createRepository() {
     | 'publishRevision'
     | 'findPublishedByKey'
     | 'findPublishedBySlug'
+    | 'searchPublishedContent'
     | 'findLifecycle'
     | 'transitionStatus'
     | 'listContent'
@@ -169,6 +172,40 @@ describe('ContentCatalogService', () => {
       document,
       checksumSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+  });
+
+  it('searches published content with a bounded query and result count', async () => {
+    const repository = createRepository();
+    repository.searchPublishedContent.mockResolvedValue([]);
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    expect(await service.searchPublishedContent('  transaction  ')).toEqual([]);
+    expect(repository.searchPublishedContent).toHaveBeenCalledWith(
+      'transaction',
+      20,
+    );
+    expect(await service.searchPublishedContent('   ')).toEqual([]);
+    expect(await service.searchPublishedContent(undefined)).toEqual([]);
+    expect(repository.searchPublishedContent).toHaveBeenCalledOnce();
+  });
+
+  it('rejects malformed and oversized public content queries', async () => {
+    const repository = createRepository();
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(
+      service.searchPublishedContent(['query']),
+    ).rejects.toBeInstanceOf(ContentSearchValidationError);
+    await expect(
+      service.searchPublishedContent('x'.repeat(161)),
+    ).rejects.toBeInstanceOf(ContentSearchValidationError);
+    expect(repository.searchPublishedContent).not.toHaveBeenCalled();
   });
 
   it('applies the explicit transition matrix and rejects transitions from the wrong state', async () => {

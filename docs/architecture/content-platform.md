@@ -54,5 +54,7 @@ operation's typed platform permission, and pass the authenticated principal to
 the catalog service. `POST /api/v1/admin/content/:id/submit-for-review` makes
 the existing review transition available; publication remains restricted to
 `IN_REVIEW`. Public slug lookup returns only an active `PUBLISHED` item and
-never falls back to its latest draft. Responses contain structured Content
-Document V1 data; rendering HTML remains a Web responsibility.
+never falls back to its latest draft. Public search matches those published
+documents and returns bounded summaries without document bodies. Content reads
+return structured Content Document V1 data; rendering HTML remains a Web
+responsibility.

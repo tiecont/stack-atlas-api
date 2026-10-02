@@ -7,6 +7,7 @@ import {
   ContentPermissionDeniedError,
   ContentRevisionConflictError,
   ContentRevisionNotFoundError,
+  ContentSearchValidationError,
   ContentSlugConflictError,
 } from '../types/content-catalog.types';
 import { ContentDocumentValidationError } from '../types/content-document';
@@ -82,6 +83,13 @@ function toContentProblem(error: unknown): StructuredProblemException | null {
       409,
       'content_identity_conflict',
       'A content item with this identity already exists.',
+    );
+  }
+  if (error instanceof ContentSearchValidationError) {
+    return new StructuredProblemException(
+      400,
+      'invalid_content_search',
+      'The search query must be a string no longer than 160 characters.',
     );
   }
   if (

@@ -19,6 +19,7 @@ import {
   ContentLifecycleTransitionError,
   ContentPermissionDeniedError,
   ContentRevisionNotFoundError,
+  ContentSearchValidationError,
 } from '../types/content-catalog.types';
 import {
   validateContentDocument,
@@ -43,6 +44,7 @@ type ContentCatalogStore = Pick<
   | 'publishRevision'
   | 'findPublishedByKey'
   | 'findPublishedBySlug'
+  | 'searchPublishedContent'
   | 'findLifecycle'
   | 'transitionStatus'
   | 'listContent'
@@ -66,6 +68,9 @@ const ALLOWED_TRANSITIONS: Readonly<
   PUBLISHED: [CONTENT_STATUS.DRAFT, CONTENT_STATUS.ARCHIVED],
   ARCHIVED: [CONTENT_STATUS.DRAFT],
 };
+
+const MAX_PUBLIC_SEARCH_QUERY_LENGTH = 160;
+const MAX_PUBLIC_SEARCH_RESULTS = 20;
 
 @Injectable()
 export class ContentCatalogService {
@@ -250,6 +255,24 @@ export class ContentCatalogService {
     contentKey: string,
   ): Promise<PublishedContentRecord | null> {
     return this.repository.findPublishedByKey(validateContentKey(contentKey));
+  }
+
+  async searchPublishedContent(
+    query: unknown,
+  ): Promise<PublishedContentRecord[]> {
+    if (query === undefined) return [];
+    if (
+      typeof query !== 'string' ||
+      query.length > MAX_PUBLIC_SEARCH_QUERY_LENGTH
+    ) {
+      throw new ContentSearchValidationError();
+    }
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) return [];
+    return this.repository.searchPublishedContent(
+      normalizedQuery,
+      MAX_PUBLIC_SEARCH_RESULTS,
+    );
   }
 
   async listContent(

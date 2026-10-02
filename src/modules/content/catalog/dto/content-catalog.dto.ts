@@ -252,6 +252,37 @@ export class ContentRevisionListResponseDto {
   nextCursor!: string | null;
 }
 
+export class PublicContentSearchItemResponseDto {
+  @ApiProperty({ format: 'uuid' })
+  contentId!: string;
+
+  @ApiProperty({ maxLength: 255 })
+  contentKey!: string;
+
+  @ApiProperty({ enum: ['article'] })
+  contentType!: 'article';
+
+  @ApiProperty({ maxLength: 2048 })
+  slug!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  publishedRevisionId!: string;
+
+  @ApiProperty({ maxLength: 160 })
+  title!: string;
+
+  @ApiProperty({ maxLength: 500 })
+  description!: string;
+
+  @ApiProperty({ format: 'date-time' })
+  publishedAt!: string;
+}
+
+export class PublicContentSearchResponseDto {
+  @ApiProperty({ type: [PublicContentSearchItemResponseDto], maxItems: 20 })
+  items!: PublicContentSearchItemResponseDto[];
+}
+
 export class ContentSeoResponseDto {
   @ApiProperty({ maxLength: 160 })
   title!: string;
