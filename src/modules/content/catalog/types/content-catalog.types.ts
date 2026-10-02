@@ -136,6 +136,15 @@ export class ContentItemNotFoundError extends Error {
   }
 }
 
+export class ContentSearchValidationError extends Error {
+  constructor() {
+    super(
+      'The public content search query must be a string no longer than 160 characters.',
+    );
+    this.name = 'ContentSearchValidationError';
+  }
+}
+
 export class ContentLifecycleTransitionError extends Error {
   constructor() {
     super('The requested content lifecycle transition is not allowed.');

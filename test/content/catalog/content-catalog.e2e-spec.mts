@@ -178,6 +178,11 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     await request(app.getHttpServer())
       .get(`/api/v1/content/${encodeURIComponent(slug)}`)
       .expect(404);
+    const draftSearch = await request(app.getHttpServer())
+      .get('/api/v1/content/search')
+      .query({ q: 'First revision' })
+      .expect(200);
+    expect(draftSearch.body.items).toEqual([]);
 
     const item = await request(app.getHttpServer())
       .get(`/api/v1/admin/content/${contentId}`)
@@ -424,6 +429,29 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     });
     expect(publicContent.body).not.toHaveProperty('html');
 
+    const search = await request(app.getHttpServer())
+      .get('/api/v1/content/search')
+      .query({ q: 'Second revision body' })
+      .expect(200)
+      .expect('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+    expect(search.body.items).toEqual([
+      expect.objectContaining({
+        contentId,
+        contentKey: created.body.contentKey,
+        contentType: 'article',
+        slug,
+        publishedRevisionId: secondRevisionId,
+        title: 'Second revision',
+        description: 'Second revision description',
+      }),
+    ]);
+    expect(search.body.items[0]).not.toHaveProperty('document');
+    await request(app.getHttpServer())
+      .get('/api/v1/content/search')
+      .query({ q: 'x'.repeat(161) })
+      .expect(400)
+      .expect('Content-Type', /application\/problem\+json/);
+
     await request(app.getHttpServer())
       .post(`/api/v1/admin/content/${contentId}/archive`)
       .set('Origin', allowedOrigin)
@@ -443,6 +471,11 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     await request(app.getHttpServer())
       .get(`/api/v1/content/${encodeURIComponent(slug)}`)
       .expect(404);
+    const archivedSearch = await request(app.getHttpServer())
+      .get('/api/v1/content/search')
+      .query({ q: 'Second revision body' })
+      .expect(200);
+    expect(archivedSearch.body.items).toEqual([]);
     await request(app.getHttpServer())
       .get(`/api/v1/content/${encodeURIComponent(secondContent.body.slug)}`)
       .expect(404);
@@ -472,10 +505,18 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       ['/api/v1/admin/content/{id}/publish', 'post'],
       ['/api/v1/admin/content/{id}/archive', 'post'],
       ['/api/v1/content/{slug}', 'get'],
+      ['/api/v1/content/search', 'get'],
     ];
     for (const [path, method] of requiredPaths) {
       expect(recordProperty(paths?.[path], method)).not.toBeNull();
     }
+    const searchOperation = recordProperty(
+      paths?.['/api/v1/content/search'],
+      'get',
+    );
+    const searchResponses = recordProperty(searchOperation, 'responses');
+    expect(searchResponses?.['200']).toBeDefined();
+    expect(searchResponses?.['400']).toBeDefined();
     const appendOperation = recordProperty(
       paths?.['/api/v1/admin/content/{id}/revisions'],
       'post',

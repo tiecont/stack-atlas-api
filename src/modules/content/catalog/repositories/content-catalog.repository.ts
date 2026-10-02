@@ -501,6 +501,87 @@ export class ContentCatalogRepository {
     return this.findPublishedByIdentity('slug', slug);
   }
 
+  async searchPublishedContent(
+    query: string,
+    limit: number,
+  ): Promise<PublishedContentRecord[]> {
+    const result = await this.database.query<
+      (RevisionRow & {
+        content_id: string;
+        content_key: string;
+        content_type: 'article';
+        slug: string;
+        status: ContentStatus;
+        item_created_by: string | null;
+      }) &
+        QueryResultRow
+    >(
+      `SELECT item.id AS content_id, item.content_key, item.content_type,
+              item.slug, item.status, item.created_by AS item_created_by,
+              revision.id, revision.content_item_id, revision.revision_number,
+              revision.schema_version, revision.checksum_sha256, revision.document,
+              revision.created_by, revision.created_at,
+              publication.published_at, publication.published_by
+       FROM stack_atlas.content_items AS item
+       JOIN stack_atlas.content_revisions AS revision
+         ON revision.id = item.published_revision_id
+        AND revision.content_item_id = item.id
+       JOIN LATERAL (
+         SELECT published_at, published_by
+         FROM stack_atlas.content_publications
+         WHERE content_item_id = item.id AND revision_id = revision.id
+         ORDER BY published_at DESC
+         LIMIT 1
+       ) AS publication ON true
+       CROSS JOIN LATERAL (
+         SELECT concat_ws(
+           ' ',
+           item.slug,
+           revision.document->>'title',
+           revision.document->>'description',
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.text')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.code')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.language')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.title')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.description')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.caption')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.alt')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.headers')::text,
+           jsonb_path_query_array(revision.document, '$.blocks[*].props.**.rows')::text
+         ) AS searchable_text
+       ) AS search
+       WHERE item.status = 'PUBLISHED'
+         AND item.archived_at IS NULL
+         AND position(lower($1) in lower(search.searchable_text)) > 0
+       ORDER BY
+         CASE
+           WHEN lower(revision.document->>'title') = lower($1) THEN 0
+           WHEN position(lower($1) in lower(revision.document->>'title')) > 0 THEN 1
+           ELSE 2
+         END,
+         publication.published_at DESC,
+         item.content_key ASC
+       LIMIT $2`,
+      [query, limit],
+    );
+
+    return result.rows.map((row) => ({
+      ...mapRevision(
+        {
+          id: row.content_id,
+          content_key: row.content_key,
+          content_type: row.content_type,
+          slug: row.slug,
+          status: row.status,
+          created_by: row.item_created_by,
+        },
+        row,
+      ),
+      publishedAt: row.published_at ?? row.created_at,
+      publishedBy: row.published_by ?? null,
+    }));
+  }
+
   private async findPublishedByIdentity(
     identityColumn: 'content_key' | 'slug',
     identity: string,

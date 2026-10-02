@@ -11,9 +11,9 @@ Web runtime reads; see
 
 All routes are under `/api/v1`. Admin routes require an active session cookie
 and resolve permissions from PostgreSQL for every request. Mutating requests
-also require an allowed `Origin`. Admin and public content responses use
-`Cache-Control: no-store` so lifecycle changes are reflected without a stale
-intermediary response.
+also require an allowed `Origin`. Admin and public slug lookup responses use
+`Cache-Control: no-store`. Public search returns only published summaries and
+may be cached for 60 seconds.
 
 ## Routes
 
@@ -28,6 +28,7 @@ intermediary response.
 | `POST` | `/admin/content/:id/submit-for-review`     | `content:update`  | Move `DRAFT` to `IN_REVIEW`                  |
 | `POST` | `/admin/content/:id/publish`               | `content:publish` | Publish a revision from `IN_REVIEW`          |
 | `POST` | `/admin/content/:id/archive`               | `content:archive` | Archive an item without deleting history     |
+| `GET`  | `/content/search?q=:query`                  | Public            | Up to 20 matching published article summaries |
 | `GET`  | `/content/:slug`                           | Public            | Active published content by URL-encoded slug |
 
 The review route exposes the lifecycle transition required before publish.
@@ -58,7 +59,9 @@ returns `404`; a stale lifecycle transition returns `409`.
 Public reads require both `status = 'PUBLISHED'` and a non-archived item with a
 revision matching its published pointer. There is no fallback to the latest
 draft. Archiving preserves revision and publication history while removing the
-item from public lookup.
+item from public lookup. Public search uses that same published pointer,
+searches the slug and document text, ranks title matches first, bounds the query
+to 160 characters, and returns at most 20 summaries without document bodies.
 
 ## Errors
 
@@ -66,8 +69,9 @@ Errors use RFC 9457 Problem Details with `application/problem+json`. Admin
 operations document `400` validation failures, `401` missing/invalid session,
 `403` missing permission, `404` missing item or item-owned revision, and `409`
 identity/slug conflict, stale revision, or invalid lifecycle state. Public
-lookup documents `400` invalid slug and `404` unpublished, missing, or archived
-content. Database driver messages are not returned.
+slug lookup documents `400` invalid slug and `404` unpublished, missing, or
+archived content. Public search documents `400` invalid or oversized queries.
+Database driver messages are not returned.
 
 ## Persistence Changes
 
