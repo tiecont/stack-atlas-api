@@ -35,7 +35,8 @@ FROM node:22-alpine AS production
 ARG APP_UID=1001
 ARG APP_GID=1001
 
-RUN addgroup --system --gid "${APP_GID}" app \
+RUN apk add --no-cache git \
+  && addgroup --system --gid "${APP_GID}" app \
   && adduser --system --disabled-password --uid "${APP_UID}" --ingroup app app
 
 WORKDIR /app
@@ -50,6 +51,7 @@ COPY --from=builder --chown=app:app /app/dist ./dist
 COPY --chown=app:app database/migrations ./database/migrations
 COPY --chown=app:app scripts/migrations ./scripts/migrations
 COPY --chown=app:app scripts/identity/platform-authorization-admin.mjs ./scripts/identity/
+COPY --chown=app:app scripts/content/catalog/git-import.mjs ./scripts/content/catalog/
 
 USER app
 

@@ -46,6 +46,8 @@ const document = {
 function createRepository() {
   return {
     createArticle: vi.fn(),
+    createPublishedArticle: vi.fn(),
+    findImportStateByKey: vi.fn(),
     appendRevision: vi.fn(),
     findRevision: vi.fn(),
     publishRevision: vi.fn(),
@@ -58,6 +60,8 @@ function createRepository() {
   } satisfies Pick<
     ContentCatalogRepository,
     | 'createArticle'
+    | 'createPublishedArticle'
+    | 'findImportStateByKey'
     | 'appendRevision'
     | 'findRevision'
     | 'publishRevision'
@@ -204,6 +208,35 @@ describe('ContentCatalogService', () => {
       ),
     ).rejects.toBeInstanceOf(ContentPermissionDeniedError);
     expect(repository.createArticle).not.toHaveBeenCalled();
+  });
+
+  it('creates a published Git import with all required permissions and actor attribution', async () => {
+    const repository = createRepository();
+    const authorization = createAuthorization();
+    const service = new ContentCatalogService(repository, authorization);
+    repository.createPublishedArticle.mockResolvedValue({} as never);
+
+    await service.createPublishedGitImportArticle(
+      {
+        contentKey: 'article:reliable-systems',
+        slug: 'articles/reliable-systems',
+        document,
+      },
+      principal,
+    );
+
+    expect(authorization.hasPermissions).toHaveBeenCalledWith(principal, [
+      PLATFORM_PERMISSION.CONTENT_CREATE,
+      PLATFORM_PERMISSION.CONTENT_UPDATE,
+      PLATFORM_PERMISSION.CONTENT_PUBLISH,
+    ]);
+    expect(repository.createPublishedArticle).toHaveBeenCalledWith({
+      contentKey: 'article:reliable-systems',
+      slug: 'articles/reliable-systems',
+      actorAccountId: principal.accountId,
+      document,
+      checksumSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
   });
 
   it('produces the same checksum when JSON object keys are ordered differently', async () => {

@@ -83,6 +83,16 @@ export interface CreateContentArticle {
   checksumSha256: string;
 }
 
+export interface ContentImportState {
+  contentId: string;
+  contentKey: string;
+  slug: string;
+  status: ContentStatus;
+  latestRevisionId: string | null;
+  publishedRevisionId: string | null;
+  latestRevisionChecksumSha256: string | null;
+}
+
 export interface CreateContentRevision {
   contentId: string;
   baseRevisionId: string;

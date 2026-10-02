@@ -4,7 +4,10 @@ The API owns the persisted Content Document V1 contract and exposes structured
 content data. It never renders authored content to HTML. Web validates and
 renders the document with its own Content Document V1 mirror and renderer.
 Web Git remains the canonical authored source until a separately approved
-cutover; these endpoints do not import Git content or dual-write it.
+cutover; these HTTP endpoints do not import Git content or dual-write it. A
+separate operator CLI imports from a clean, pinned Web commit without changing
+Web runtime reads; see
+[`../operations/git-content-import.md`](../operations/git-content-import.md).
 
 All routes are under `/api/v1`. Admin routes require an active session cookie
 and resolve permissions from PostgreSQL for every request. Mutating requests
