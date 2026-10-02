@@ -11,6 +11,7 @@ import type {
   ContentRevisionListResult,
   ContentRevisionRecord,
   ContentRevisionSummary,
+  ContentImportState,
   PublishedContentRecord,
   PublishContentRevision,
   TransitionContentStatus,
@@ -67,6 +68,16 @@ interface ContentRevisionSummaryRow extends QueryResultRow {
   created_at: Date;
   published_at: Date | null;
   published_by: string | null;
+}
+
+interface ContentImportStateRow extends QueryResultRow {
+  id: string;
+  content_key: string;
+  slug: string;
+  status: ContentStatus;
+  latest_revision_id: string | null;
+  published_revision_id: string | null;
+  latest_revision_checksum_sha256: string | null;
 }
 
 @Injectable()
@@ -131,6 +142,123 @@ export class ContentCatalogRepository {
       }
       throw error;
     }
+  }
+
+  async createPublishedArticle(
+    input: CreateContentArticle,
+  ): Promise<PublishedContentRecord> {
+    try {
+      return await this.database.transaction(async (client) => {
+        const contentId = randomUUID();
+        const item = await client.query<ContentRow>(
+          `INSERT INTO stack_atlas.content_items
+             (id, content_key, content_type, slug, created_by)
+           VALUES ($1, $2, 'article', $3, $4)
+           RETURNING id, content_key, content_type, slug, status,
+                     latest_revision_id, published_revision_id, created_by,
+                     archived_at, archived_by, created_at, updated_at`,
+          [contentId, input.contentKey, input.slug, input.actorAccountId],
+        );
+        const row = item.rows[0];
+        if (!row)
+          throw new Error(
+            'PostgreSQL did not return the imported content item.',
+          );
+
+        const revision = await this.insertRevision(client, {
+          contentId,
+          contentKey: row.content_key,
+          slug: row.slug,
+          status: row.status,
+          createdBy: row.created_by,
+          actorAccountId: input.actorAccountId,
+          revisionNumber: 1,
+          document: input.document,
+          checksumSha256: input.checksumSha256,
+        });
+        await client.query(
+          `UPDATE stack_atlas.content_items
+           SET latest_revision_id = $2, updated_at = now()
+           WHERE id = $1`,
+          [contentId, revision.revisionId],
+        );
+        const review = await client.query<{ id: string } & QueryResultRow>(
+          `UPDATE stack_atlas.content_items
+           SET status = 'IN_REVIEW', updated_at = now()
+           WHERE id = $1 AND status = 'DRAFT'
+           RETURNING id`,
+          [contentId],
+        );
+        if (!review.rows[0]) throw new ContentLifecycleConflictError();
+
+        const publication = await client.query<
+          { published_at: Date; published_by: string } & QueryResultRow
+        >(
+          `INSERT INTO stack_atlas.content_publications
+             (id, content_item_id, revision_id, published_at, published_by)
+           VALUES ($1, $2, $3, now(), $4)
+           RETURNING published_at, published_by`,
+          [randomUUID(), contentId, revision.revisionId, input.actorAccountId],
+        );
+        const publishedAt = publication.rows[0]?.published_at;
+        const publishedBy = publication.rows[0]?.published_by;
+        if (!publishedAt || !publishedBy) {
+          throw new Error(
+            'PostgreSQL did not return imported publication metadata.',
+          );
+        }
+
+        const published = await client.query<{ id: string } & QueryResultRow>(
+          `UPDATE stack_atlas.content_items
+           SET status = 'PUBLISHED', published_revision_id = $2, updated_at = now()
+           WHERE id = $1 AND status = 'IN_REVIEW'
+           RETURNING id`,
+          [contentId, revision.revisionId],
+        );
+        if (!published.rows[0]) throw new ContentLifecycleConflictError();
+        return {
+          ...revision,
+          status: 'PUBLISHED',
+          publishedAt,
+          publishedBy,
+        };
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        if (uniqueConstraint(error) === 'content_items_active_slug_unique') {
+          throw new ContentSlugConflictError();
+        }
+        throw new ContentIdentityConflictError();
+      }
+      throw error;
+    }
+  }
+
+  async findImportStateByKey(
+    contentKey: string,
+  ): Promise<ContentImportState | null> {
+    const result = await this.database.query<ContentImportStateRow>(
+      `SELECT item.id, item.content_key, item.slug, item.status,
+              item.latest_revision_id, item.published_revision_id,
+              revision.checksum_sha256 AS latest_revision_checksum_sha256
+       FROM stack_atlas.content_items AS item
+       LEFT JOIN stack_atlas.content_revisions AS revision
+         ON revision.id = item.latest_revision_id
+        AND revision.content_item_id = item.id
+       WHERE item.content_key = $1`,
+      [contentKey],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      contentId: row.id,
+      contentKey: row.content_key,
+      slug: row.slug,
+      status: row.status,
+      latestRevisionId: row.latest_revision_id,
+      publishedRevisionId: row.published_revision_id,
+      latestRevisionChecksumSha256: row.latest_revision_checksum_sha256,
+    };
   }
 
   appendRevision(input: CreateContentRevision): Promise<ContentRevisionRecord> {

@@ -9,12 +9,14 @@ repository uses PostgreSQL transactions and row locks to append a revision and
 move the latest pointer, publish and move the published pointer, or archive and
 restore an item without deleting its history.
 
-Web Git remains the canonical authored source during this phase. The API does
-not import existing Git content or serve learner pages, and there is no
-dual-write. The admin HTTP API exposes catalog creation, structured revision
-preview, lifecycle operations, publication, and published-only public reads.
-Web editor integration and an explicit authored-content cutover belong to a
-later phase.
+Web Git remains the canonical authored source until a separate cutover. An
+explicit operator CLI imports published articles from a clean Web checkout
+pinned to an exact commit SHA. It records the source inventory and reports
+unsupported HTML and relationship metadata the API cannot persist. Each item,
+revision, lifecycle transition, and publication is created through the catalog
+service in one PostgreSQL transaction. The import does not switch Web runtime
+reads or remove Git content. The admin HTTP API remains the authoring surface;
+public reads return only published content.
 
 V1 is limited to article content. A future content kind needs its own validated
 document contract. The API contract is defined in

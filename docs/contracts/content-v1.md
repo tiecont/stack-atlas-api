@@ -1,8 +1,9 @@
 # Content document contract v1
 
-This contract is owned by the API for persisted content. During the current
-product phase, Web Git content remains canonical. The API content tables are
-not populated from Git, and Web does not read them. Web maintains an independent
+This contract is owned by the API for persisted content. Web Git remains
+canonical until a separately approved runtime cutover. An explicit operator
+importer can populate API content tables from one clean, pinned Web commit, but
+Web does not read those tables during this phase. Web maintains an independent
 mirror of these semantics and must not import source files from the API
 repository.
 
@@ -49,10 +50,13 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 - A revision stores a validated document and SHA-256 checksum of canonical JSON.
 - Publication history is append-only. The current published revision points to
   one immutable revision belonging to the same content identity.
-- Git import/cutover is not part of this phase. Admin HTTP routes check current
-  platform permissions and call the catalog service; public HTTP reads return
-  only active published revisions. HTTP responses contain structured
-  Content Document V1 data, never rendered HTML.
+- The operator Git importer creates published article revisions through the
+  catalog service and records the source SHA, file inventory, and relationship
+  or unsupported-construct gaps. Import does not switch Web runtime reads or
+  remove Git content. Admin HTTP routes check current platform permissions and
+  call the catalog service; public HTTP reads return only active published
+  revisions. HTTP responses contain structured Content Document V1 data,
+  never rendered HTML.
 
 ## Document
 

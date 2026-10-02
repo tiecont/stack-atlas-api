@@ -94,17 +94,16 @@ shared rate limiter; add edge or durable shared rate limiting before public
 credential traffic. MFA and session-management UI are later identity work.
 The Engine is not needed for health or identity and is not a startup dependency.
 
-## Content platform foundation
+## Content platform
 
-The API now owns stable article identity, validated immutable revisions, and
-publication history in PostgreSQL. The content service is not exposed through
-HTTP yet; authoring endpoints and admin authorization are the next API phase.
-Web Git remains the canonical authored source, and this foundation does not
-import existing articles or change Web reads. See
-[`docs/architecture/content-platform.md`](docs/architecture/content-platform.md)
-for the phase boundary and
-[`docs/contracts/content-v1.md`](docs/contracts/content-v1.md) for the V1
-document and persistence rules.
+The API owns stable article identity, Content Document V1 revisions,
+publication history, and the admin HTTP API in PostgreSQL. Web Git remains the
+canonical authored source until a separate cutover. The explicit Git importer
+can copy published articles from a clean, pinned Web commit; it does not change
+Web runtime reads or delete Git content. See
+[`docs/architecture/content-platform.md`](docs/architecture/content-platform.md),
+[`docs/contracts/content-v1.md`](docs/contracts/content-v1.md), and
+[`docs/operations/git-content-import.md`](docs/operations/git-content-import.md).
 
 See [`docs/contracts/identity-v1.md`](docs/contracts/identity-v1.md) for the
 stable endpoint and cookie contract.

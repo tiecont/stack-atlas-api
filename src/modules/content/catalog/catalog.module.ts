@@ -11,6 +11,7 @@ import { AdminContentController } from './controllers/admin-content.controller';
 import { PublicContentController } from './controllers/public-content.controller';
 import { ContentCatalogRepository } from './repositories/content-catalog.repository';
 import { ContentCatalogService } from './services/content-catalog.service';
+import { GitContentImportService } from './services/git-content-import.service';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { ContentCatalogService } from './services/content-catalog.service';
   providers: [
     ContentCatalogRepository,
     ContentCatalogService,
+    GitContentImportService,
     SessionAuthGuard,
     PermissionGuard,
     OriginGuard,

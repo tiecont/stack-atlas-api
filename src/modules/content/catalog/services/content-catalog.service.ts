@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { AuthenticatedPrincipal } from '../../../identity/authentication/types/authenticated-principal';
 import { PLATFORM_PERMISSION } from '../../../identity/platform-authorization/constants/platform-permissions';
@@ -11,6 +10,7 @@ import type {
   ContentRevisionRecord,
   ContentRevisionSummary,
   PublishedContentRecord,
+  ContentImportState,
   ContentStatus,
 } from '../types/content-catalog.types';
 import {
@@ -25,6 +25,7 @@ import {
   validateContentKey,
 } from '../types/content-document';
 import { normalizeContentSlug } from '../types/content-slug';
+import { checksumContent } from '../helpers/content-checksum';
 import {
   decodeContentListCursor,
   decodeRevisionCursor,
@@ -35,6 +36,8 @@ import {
 type ContentCatalogStore = Pick<
   ContentCatalogRepository,
   | 'createArticle'
+  | 'createPublishedArticle'
+  | 'findImportStateByKey'
   | 'appendRevision'
   | 'findRevision'
   | 'publishRevision'
@@ -88,7 +91,55 @@ export class ContentCatalogService {
       slug: validatedSlug,
       actorAccountId: principal.accountId,
       document: validatedDocument,
-      checksumSha256: checksum(validatedDocument),
+      checksumSha256: checksumContent(validatedDocument),
+    });
+  }
+
+  async findGitImportState(
+    contentKey: string,
+    principal: AuthenticatedPrincipal,
+  ): Promise<ContentImportState | null> {
+    await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
+    return this.repository.findImportStateByKey(validateContentKey(contentKey));
+  }
+
+  authorizeGitContentImport(
+    write: boolean,
+    principal: AuthenticatedPrincipal,
+  ): Promise<void> {
+    return this.requirePermissions(
+      principal,
+      write
+        ? [
+            PLATFORM_PERMISSION.CONTENT_READ,
+            PLATFORM_PERMISSION.CONTENT_CREATE,
+            PLATFORM_PERMISSION.CONTENT_UPDATE,
+            PLATFORM_PERMISSION.CONTENT_PUBLISH,
+          ]
+        : [PLATFORM_PERMISSION.CONTENT_READ],
+    );
+  }
+
+  async createPublishedGitImportArticle(
+    input: { contentKey: string; slug: unknown; document: unknown },
+    principal: AuthenticatedPrincipal,
+  ): Promise<PublishedContentRecord> {
+    await this.requirePermissions(principal, [
+      PLATFORM_PERMISSION.CONTENT_CREATE,
+      PLATFORM_PERMISSION.CONTENT_UPDATE,
+      PLATFORM_PERMISSION.CONTENT_PUBLISH,
+    ]);
+    const contentKey = validateContentKey(input.contentKey);
+    const slug = normalizeContentSlug(input.slug);
+    const document = validateContentDocument(input.document);
+    assertAllowedTransition(CONTENT_STATUS.DRAFT, CONTENT_STATUS.IN_REVIEW);
+    assertAllowedTransition(CONTENT_STATUS.IN_REVIEW, CONTENT_STATUS.PUBLISHED);
+    return this.repository.createPublishedArticle({
+      contentKey,
+      slug,
+      actorAccountId: principal.accountId,
+      document,
+      checksumSha256: checksumContent(document),
     });
   }
 
@@ -108,7 +159,7 @@ export class ContentCatalogService {
       baseRevisionId,
       actorAccountId: principal.accountId,
       document: validatedDocument,
-      checksumSha256: checksum(validatedDocument),
+      checksumSha256: checksumContent(validatedDocument),
     });
   }
 
@@ -290,7 +341,14 @@ export class ContentCatalogService {
     principal: AuthenticatedPrincipal,
     permission: PlatformPermission,
   ): Promise<void> {
-    if (!(await this.authorization.hasPermissions(principal, [permission]))) {
+    await this.requirePermissions(principal, [permission]);
+  }
+
+  private async requirePermissions(
+    principal: AuthenticatedPrincipal,
+    permissions: readonly PlatformPermission[],
+  ): Promise<void> {
+    if (!(await this.authorization.hasPermissions(principal, permissions))) {
       throw new ContentPermissionDeniedError();
     }
   }
@@ -303,19 +361,4 @@ function assertAllowedTransition(
   if (!ALLOWED_TRANSITIONS[currentStatus].includes(nextStatus)) {
     throw new ContentLifecycleTransitionError();
   }
-}
-
-function checksum(value: unknown): string {
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalize(value)))
-    .digest('hex');
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => canonicalize(item));
-  if (typeof value !== 'object' || value === null) return value;
-  const entries = Object.entries(value)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, item]) => [key, canonicalize(item)] as const);
-  return Object.fromEntries(entries);
 }

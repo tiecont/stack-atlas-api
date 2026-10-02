@@ -7,6 +7,7 @@ import { PlatformAuthorizationService } from '../../../src/modules/identity/plat
 import type { AuthenticatedPrincipal } from '../../../src/modules/identity/authentication/types/authenticated-principal.js';
 import { ContentCatalogRepository } from '../../../src/modules/content/catalog/repositories/content-catalog.repository.js';
 import { ContentCatalogService } from '../../../src/modules/content/catalog/services/content-catalog.service.js';
+import { GitContentImportService } from '../../../src/modules/content/catalog/services/git-content-import.service.js';
 import {
   ContentLifecycleTransitionError,
   ContentPermissionDeniedError,
@@ -14,6 +15,11 @@ import {
   ContentSlugConflictError,
 } from '../../../src/modules/content/catalog/types/content-catalog.types.js';
 import { ContentDocumentValidationError } from '../../../src/modules/content/catalog/types/content-document.js';
+import { validateContentDocument } from '../../../src/modules/content/catalog/types/content-document.js';
+import type {
+  GitContentSnapshot,
+  GitContentSourceArticle,
+} from '../../../src/modules/content/catalog/types/git-content-import.types.js';
 import { ContentSlugValidationError } from '../../../src/modules/content/catalog/types/content-slug.js';
 import { migrate } from '../../../scripts/migrations/runner.mjs';
 import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
@@ -284,6 +290,150 @@ describe('PostgreSQL content catalog lifecycle', () => {
     expect(stillArchived.rows[0]?.status).toBe('ARCHIVED');
     expect(stillArchived.rows[0]?.archived_at).toBeInstanceOf(Date);
   });
+
+  it('imports a published article atomically, verifies it, and rejects a conflicting rerun', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+    const contentKey = `article:git-import-${randomUUID()}`;
+    const slug = `articles/git-import-${randomUUID()}`;
+    const imported = await service.createPublishedGitImportArticle(
+      { contentKey, slug, document: makeDocument('Imported article') },
+      actor,
+    );
+
+    expect(imported).toMatchObject({
+      contentKey,
+      slug,
+      status: 'PUBLISHED',
+      revisionNumber: 1,
+      createdBy: actor.accountId,
+      revisionCreatedBy: actor.accountId,
+      publishedBy: actor.accountId,
+    });
+    const state = await service.findGitImportState(contentKey, actor);
+    expect(state).toMatchObject({
+      contentKey,
+      slug,
+      status: 'PUBLISHED',
+      latestRevisionId: imported.revisionId,
+      publishedRevisionId: imported.revisionId,
+      latestRevisionChecksumSha256: imported.checksumSha256,
+    });
+
+    const publicationHistory = await pool!.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM stack_atlas.content_publications WHERE content_item_id = $1`,
+      [imported.contentId],
+    );
+    expect(publicationHistory.rows[0]?.count).toBe('1');
+
+    await expect(
+      service.createPublishedGitImportArticle(
+        { contentKey, slug, document: makeDocument('Imported article') },
+        actor,
+      ),
+    ).rejects.toThrow();
+    const afterConflict = await pool!.query<{
+      revisions: string;
+      publications: string;
+    }>(
+      `SELECT
+         (SELECT count(*)::text FROM stack_atlas.content_revisions WHERE content_item_id = $1) AS revisions,
+         (SELECT count(*)::text FROM stack_atlas.content_publications WHERE content_item_id = $1) AS publications`,
+      [imported.contentId],
+    );
+    expect(afterConflict.rows[0]).toEqual({ revisions: '1', publications: '1' });
+  });
+
+  it('rolls back the item and revision when publication fails inside the import transaction', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+    const contentKey = `article:git-import-rollback-${randomUUID()}`;
+    const slug = `articles/git-import-rollback-${randomUUID()}`;
+    await pool!.query(`
+      CREATE OR REPLACE FUNCTION stack_atlas.fail_test_git_import_publication()
+      RETURNS trigger LANGUAGE plpgsql AS $function$
+      BEGIN
+        IF NEW.content_item_id IN (
+          SELECT id FROM stack_atlas.content_items WHERE content_key = '${contentKey}'
+        ) THEN
+          RAISE EXCEPTION 'injected import publication failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $function$
+    `);
+    await pool!.query(`
+      CREATE TRIGGER fail_test_git_import_publication
+      BEFORE INSERT ON stack_atlas.content_publications
+      FOR EACH ROW EXECUTE FUNCTION stack_atlas.fail_test_git_import_publication()
+    `);
+    try {
+      await expect(
+        service.createPublishedGitImportArticle(
+          { contentKey, slug, document: makeDocument('Rollback article') },
+          actor,
+        ),
+      ).rejects.toThrow('injected import publication failure');
+    } finally {
+      await pool!.query('DROP TRIGGER IF EXISTS fail_test_git_import_publication ON stack_atlas.content_publications');
+      await pool!.query('DROP FUNCTION IF EXISTS stack_atlas.fail_test_git_import_publication()');
+    }
+    const remaining = await pool!.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM stack_atlas.content_items WHERE content_key = $1`,
+      [contentKey],
+    );
+    expect(remaining.rows[0]?.count).toBe('0');
+  });
+
+  it('runs dry-run, apply, idempotent rerun, and verify against PostgreSQL', async () => {
+    const actor = await createActor(pool!, true);
+    const importer = new GitContentImportService(createService(pool!));
+    const sourceId = `git-import-${randomUUID()}`;
+    const contentKey = `article:${sourceId}`;
+    const slug = `articles/imported/${sourceId}`;
+    const snapshot = makeImportSnapshot(sourceId, contentKey, slug);
+
+    const dryRun = await importer.run(snapshot, 'dry-run', actor);
+    expect(dryRun.articles[0]?.status).toBe('ready');
+    expect(dryRun.summary.imported).toBe(0);
+
+    const applied = await importer.run(snapshot, 'apply', actor);
+    expect(applied.articles[0]?.status).toBe('imported');
+    expect(applied.summary.imported).toBe(1);
+
+    const repeated = await importer.run(snapshot, 'apply', actor);
+    expect(repeated.articles[0]?.status).toBe('already_imported');
+    expect(repeated.summary.imported).toBe(0);
+
+    const verified = await importer.run(snapshot, 'verify', actor);
+    expect(verified.articles[0]?.status).toBe('verified');
+    expect(verified.source.commitSha).toBe(snapshot.commitSha);
+
+    const persisted = await pool!.query<{
+      status: string;
+      latest_revision_id: string;
+      published_revision_id: string;
+      revision_count: string;
+      publication_count: string;
+    }>(
+      `SELECT item.status, item.latest_revision_id, item.published_revision_id,
+              (SELECT count(*)::text FROM stack_atlas.content_revisions AS revision
+               WHERE revision.content_item_id = item.id) AS revision_count,
+              (SELECT count(*)::text FROM stack_atlas.content_publications AS publication
+               WHERE publication.content_item_id = item.id) AS publication_count
+       FROM stack_atlas.content_items AS item WHERE item.content_key = $1`,
+      [contentKey],
+    );
+    expect(persisted.rows[0]).toMatchObject({
+      status: 'PUBLISHED',
+      revision_count: '1',
+      publication_count: '1',
+    });
+    expect(persisted.rows[0]?.latest_revision_id).toBe(
+      persisted.rows[0]?.published_revision_id,
+    );
+  });
 });
 
 function createService(databasePool: Pool): ContentCatalogService {
@@ -352,5 +502,57 @@ function makeDocument(title: string, href = '/docs/transactions'): unknown {
         },
       },
     ],
+  };
+}
+
+function makeImportSnapshot(
+  sourceId: string,
+  contentKey: string,
+  slug: string,
+): GitContentSnapshot {
+  const document = validateContentDocument(makeDocument('Imported article'));
+  const article: GitContentSourceArticle = {
+    sourceId,
+    contentKey,
+    slug,
+    title: document.title,
+    description: document.description,
+    sourceStatus: 'published',
+    document,
+    sourceFiles: [
+      `content/articles/imported/${sourceId}/article.yaml`,
+      `content/articles/imported/${sourceId}/article.html`,
+    ],
+    sourceChecksumSha256: 'a'.repeat(64),
+    relationships: {
+      domain: 'systems',
+      category: 'engineering',
+      tags: ['transactional'],
+      authors: ['tiecont'],
+      difficulty: 'unspecified',
+      labs: [],
+      kubernetes: null,
+      review: null,
+      learningPaths: [{ pathId: 'systems', moduleId: 'persistence' }],
+      prerequisites: [],
+      related: [],
+      legacyUrls: ['/legacy/imported.html'],
+    },
+    warnings: [],
+    errors: [],
+  };
+  return {
+    repository: 'tiecont/stack-atlas',
+    commitSha: 'd'.repeat(40),
+    sourceRoot: '/tmp/stack-atlas-git-import-test',
+    inventory: [
+      {
+        path: article.sourceFiles[0] ?? '',
+        sha256: 'b'.repeat(64),
+      },
+    ],
+    articles: [article],
+    pathRecords: [],
+    sourceErrors: [],
   };
 }
