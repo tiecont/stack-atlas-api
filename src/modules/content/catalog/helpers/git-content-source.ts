@@ -29,7 +29,7 @@ import type {
   ContentCatalogTopicV1,
 } from '../types/content-catalog.types';
 import { validateContentCatalogSnapshot } from '../types/content-catalog-snapshot';
-import { normalizeContentSlug } from '../types/content-slug';
+import { assertCanonicalArticleSlug } from '../types/content-slug';
 
 const SOURCE_REPOSITORY = 'tiecont/stack-atlas';
 const LOCAL_ORIGIN = 'https://stack-atlas.invalid';
@@ -763,10 +763,7 @@ function sourceArticle(
     );
   } else {
     try {
-      if (!/^\/articles\//.test(rawUrl)) {
-        throw new Error('Article URL must be under /articles/.');
-      }
-      article.slug = normalizeContentSlug(rawUrl.replace(/^\/+|\/+$/g, ''));
+      article.slug = assertCanonicalArticleSlug(rawUrl.replace(/^\/|\/$/g, ''));
     } catch (error) {
       article.errors.push(
         issue('invalid_article_url', errorMessage(error), yamlPath),

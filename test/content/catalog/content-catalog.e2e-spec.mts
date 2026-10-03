@@ -7,8 +7,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { configureHttp } from '../../../src/app.config.js';
 import { AppModule } from '../../../src/app.module.js';
 import { DATABASE_POOL } from '../../../src/database/database.constants.js';
+import { checksumContent } from '../../../src/modules/content/catalog/helpers/content-checksum.js';
+import { ContentCatalogRepository } from '../../../src/modules/content/catalog/repositories/content-catalog.repository.js';
 import { PlatformAuthorizationService } from '../../../src/modules/identity/platform-authorization/services/platform-authorization.service.js';
 import { ContentCatalogService } from '../../../src/modules/content/catalog/services/content-catalog.service.js';
+import { validateContentDocument } from '../../../src/modules/content/catalog/types/content-document.js';
 import { migrate } from '../../../scripts/migrations/runner.mjs';
 import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
@@ -167,7 +170,7 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       .expect(403)
       .expect('Content-Type', /application\/problem\+json/);
 
-    const slug = `e2e/${randomUUID()}`;
+    const slug = `articles/architecture/e2e-${randomUUID()}`;
     const contentKey = `article:${randomUUID()}`;
     const firstDocument = contentDocument('First revision');
     const created = await request(app.getHttpServer())
@@ -340,7 +343,7 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       .set('Cookie', editor.cookie)
       .send({
         contentKey: `article:${randomUUID()}`,
-        slug: `e2e/cross-item-${randomUUID()}`,
+        slug: `articles/architecture/cross-item-${randomUUID()}`,
         document: contentDocument('Other content'),
       })
       .expect(201);
@@ -568,6 +571,144 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     expect(archiveHistory.rows[0]?.publication_count).toBe('1');
   }, 30_000);
 
+  it('enforces the canonical route contract at HTTP boundaries', async () => {
+    const editor = await createAccountAndLogin(app, 'route-editor');
+    const publisher = await createAccountAndLogin(app, 'route-publisher');
+    const authorization = app.get(PlatformAuthorizationService);
+    await authorization.changeRoleAssignment(
+      editor.accountId,
+      'content-editor',
+      true,
+    );
+    await authorization.changeRoleAssignment(
+      publisher.accountId,
+      'content-editor',
+      true,
+    );
+    await authorization.changeRoleAssignment(
+      publisher.accountId,
+      'content-publisher',
+      true,
+    );
+
+    const invalidKey = 'article:' + randomUUID();
+    const invalidCreate = await request(app.getHttpServer())
+      .post('/api/v1/admin/content')
+      .set('Origin', allowedOrigin)
+      .set('Cookie', editor.cookie)
+      .send({
+        contentKey: invalidKey,
+        slug: 'engineering/new-guide',
+        document: contentDocument('Invalid route'),
+      })
+      .expect(400)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(invalidCreate.body).toMatchObject({
+      code: 'invalid_content_route',
+      status: 400,
+      retryable: false,
+      detail: 'The article route must match articles/<domain>/<slug>.',
+    });
+    const invalidCounts = await pool.query<{
+      items: string;
+      revisions: string;
+    }>(
+      'SELECT (SELECT count(*)::text FROM stack_atlas.content_items WHERE content_key = $1) AS items, (SELECT count(*)::text FROM stack_atlas.content_revisions AS revision JOIN stack_atlas.content_items AS item ON item.id = revision.content_item_id WHERE item.content_key = $1) AS revisions',
+      [invalidKey],
+    );
+    expect(invalidCounts.rows[0]).toEqual({ items: '0', revisions: '0' });
+
+    const canonicalSlug =
+      'articles/architecture/canonical-' + randomUUID();
+    const canonicalCreate = await request(app.getHttpServer())
+      .post('/api/v1/admin/content')
+      .set('Origin', allowedOrigin)
+      .set('Cookie', editor.cookie)
+      .send({
+        contentKey: 'article:' + randomUUID(),
+        slug: canonicalSlug,
+        document: contentDocument('Canonical route'),
+      })
+      .expect(201);
+    expect(canonicalCreate.body.slug).toBe(canonicalSlug);
+
+    const malformedLookup = await request(app.getHttpServer())
+      .get('/api/v1/content/' + encodeURIComponent('engineering/new-guide'))
+      .expect(400)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(malformedLookup.body).toMatchObject({
+      code: 'invalid_content_route',
+      status: 400,
+      retryable: false,
+    });
+    await request(app.getHttpServer())
+      .get(
+        '/api/v1/content/' +
+          encodeURIComponent('articles/golang/missing-' + randomUUID()),
+      )
+      .expect(404)
+      .expect('Content-Type', /application\/problem\+json/);
+
+    const historicalDocument = validateContentDocument(
+      contentDocument('Historical route'),
+    );
+    const historical = await app
+      .get(ContentCatalogRepository)
+      .createArticle({
+        contentKey: 'article:' + randomUUID(),
+        slug: 'legacy-domain/legacy-article-' + randomUUID(),
+        actorAccountId: editor.accountId,
+        document: historicalDocument,
+        checksumSha256: checksumContent(historicalDocument),
+      });
+    await request(app.getHttpServer())
+      .post(
+        '/api/v1/admin/content/' +
+          historical.contentId +
+          '/submit-for-review',
+      )
+      .set('Origin', allowedOrigin)
+      .set('Cookie', editor.cookie)
+      .expect(200);
+
+    const beforePublish = await pool.query<{
+      status: string;
+      published_revision_id: string | null;
+      publication_count: string;
+    }>(
+      'SELECT item.status, item.published_revision_id, count(publication.id)::text AS publication_count FROM stack_atlas.content_items AS item LEFT JOIN stack_atlas.content_publications AS publication ON publication.content_item_id = item.id WHERE item.id = $1 GROUP BY item.id',
+      [historical.contentId],
+    );
+    const refusedPublish = await request(app.getHttpServer())
+      .post('/api/v1/admin/content/' + historical.contentId + '/publish')
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ revisionId: historical.revisionId })
+      .expect(409)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(refusedPublish.body).toMatchObject({
+      code: 'content_route_not_publishable',
+      status: 409,
+      retryable: false,
+      detail:
+        'The content item does not have a canonical public article route.',
+    });
+    const afterPublish = await pool.query<{
+      status: string;
+      published_revision_id: string | null;
+      publication_count: string;
+    }>(
+      'SELECT item.status, item.published_revision_id, count(publication.id)::text AS publication_count FROM stack_atlas.content_items AS item LEFT JOIN stack_atlas.content_publications AS publication ON publication.content_item_id = item.id WHERE item.id = $1 GROUP BY item.id',
+      [historical.contentId],
+    );
+    expect(afterPublish.rows).toEqual(beforePublish.rows);
+    expect(afterPublish.rows[0]).toEqual({
+      status: 'IN_REVIEW',
+      published_revision_id: null,
+      publication_count: '0',
+    });
+  });
+
   it('documents the complete admin and public content HTTP surface with Problem Details errors', async () => {
     const response = await request(app.getHttpServer())
       .get('/docs-json')
@@ -605,10 +746,54 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     for (const status of ['201', '400', '401', '403', '404', '409']) {
       expect(appendResponses?.[status]).toBeDefined();
     }
+    const createOperation = recordProperty(
+      paths?.['/api/v1/admin/content'],
+      'post',
+    );
+    const createResponses = recordProperty(createOperation, 'responses');
+    expect(recordProperty(createResponses, '400')?.['description']).toContain(
+      'invalid_content_route',
+    );
+    const publishOperation = recordProperty(
+      paths?.['/api/v1/admin/content/{id}/publish'],
+      'post',
+    );
+    expect(
+      recordProperty(
+        recordProperty(publishOperation, 'responses'),
+        '409',
+      )?.['description'],
+    ).toContain('content_route_not_publishable');
+    const publicLookupOperation = recordProperty(
+      paths?.['/api/v1/content/{slug}'],
+      'get',
+    );
+    expect(
+      recordProperty(
+        recordProperty(publicLookupOperation, 'responses'),
+        '400',
+      )?.['description'],
+    ).toContain('invalid_content_route');
 
     const schemas = recordProperty(
       recordProperty(response.body, 'components'),
       'schemas',
+    );
+    const createProperties = recordProperty(
+      schemas?.['CreateContentDto'],
+      'properties',
+    );
+    expect(recordProperty(createProperties, 'slug')).toMatchObject({
+      example: 'articles/architecture/transactional-outbox',
+      description:
+        'Article route normalized and stored as articles/<domain>/<slug>; both segments use lowercase ASCII letters, digits, and single hyphens.',
+    });
+    const itemProperties = recordProperty(
+      schemas?.['ContentItemResponseDto'],
+      'properties',
+    );
+    expect(recordProperty(itemProperties, 'slug')?.['pattern']).toContain(
+      '^articles/',
     );
     for (const schemaName of ['CreateContentDto', 'CreateContentRevisionDto']) {
       const properties = recordProperty(schemas?.[schemaName], 'properties');

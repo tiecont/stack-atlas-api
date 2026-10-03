@@ -13,6 +13,7 @@ import {
 } from 'class-validator';
 import { CONTENT_STATUS } from '../types/content-catalog.types';
 import type { ContentStatus } from '../types/content-catalog.types';
+import { CANONICAL_ARTICLE_SLUG_PATTERN } from '../types/content-slug';
 
 const MAX_PAGE_SIZE = 100;
 
@@ -59,7 +60,12 @@ export class CreateContentDto {
   @MaxLength(255)
   contentKey!: string;
 
-  @ApiProperty({ maxLength: 1024, example: 'engineering/transactional-outbox' })
+  @ApiProperty({
+    maxLength: 1024,
+    example: 'articles/architecture/transactional-outbox',
+    description:
+      'Article route normalized and stored as articles/<domain>/<slug>; both segments use lowercase ASCII letters, digits, and single hyphens.',
+  })
   @IsString()
   @MaxLength(1024)
   slug!: string;
@@ -130,7 +136,11 @@ export class ContentItemResponseDto {
   @ApiProperty({ maxLength: 255 })
   contentKey!: string;
 
-  @ApiProperty({ example: 'engineering/transactional-outbox' })
+  @ApiProperty({
+    maxLength: 255,
+    pattern: CANONICAL_ARTICLE_SLUG_PATTERN,
+    example: 'articles/architecture/transactional-outbox',
+  })
   slug!: string;
 
   @ApiProperty({ enum: Object.values(CONTENT_STATUS) })
@@ -191,7 +201,11 @@ export class ContentRevisionResponseDto {
   @ApiProperty({ maxLength: 255 })
   contentKey!: string;
 
-  @ApiProperty({ example: 'engineering/transactional-outbox' })
+  @ApiProperty({
+    maxLength: 255,
+    pattern: CANONICAL_ARTICLE_SLUG_PATTERN,
+    example: 'articles/architecture/transactional-outbox',
+  })
   slug!: string;
 
   @ApiProperty({ enum: Object.values(CONTENT_STATUS) })
@@ -262,7 +276,11 @@ export class PublicContentSearchItemResponseDto {
   @ApiProperty({ enum: ['article'] })
   contentType!: 'article';
 
-  @ApiProperty({ maxLength: 2048 })
+  @ApiProperty({
+    maxLength: 255,
+    pattern: CANONICAL_ARTICLE_SLUG_PATTERN,
+    example: 'articles/architecture/transactional-outbox',
+  })
   slug!: string;
 
   @ApiProperty({ format: 'uuid' })
@@ -428,7 +446,11 @@ export class PublicCatalogArticleResponseDto {
   @ApiProperty({ format: 'uuid' })
   contentId!: string;
 
-  @ApiProperty({ maxLength: 2048 })
+  @ApiProperty({
+    maxLength: 255,
+    pattern: CANONICAL_ARTICLE_SLUG_PATTERN,
+    example: 'articles/architecture/transactional-outbox',
+  })
   slug!: string;
 
   @ApiProperty({ maxLength: 160 })
@@ -508,7 +530,11 @@ export class PublicContentResponseDto {
   @ApiProperty({ enum: ['article'] })
   contentType!: 'article';
 
-  @ApiProperty()
+  @ApiProperty({
+    maxLength: 255,
+    pattern: CANONICAL_ARTICLE_SLUG_PATTERN,
+    example: 'articles/architecture/transactional-outbox',
+  })
   slug!: string;
 
   @ApiProperty({ format: 'uuid' })

@@ -16,11 +16,14 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 
 - `content_key` is a stable, unique, lowercase key such as
   `article:transactional-outbox`.
-- `slug` is the route identity. It is normalized to lowercase, uses URL-safe
-  slash-separated segments, is at most 255 characters, and cannot contain
-  empty segments, `..`, or a reserved first segment (`api`, `admin`, `login`,
-  `register`, `account`, or `_next`). Whitespace becomes a hyphen; whitespace
-  around `/` is removed. Only non-archived items reserve a slug.
+- `slug` is the canonical public article route identity and has exactly the
+  form `articles/<domain>/<slug>`, for example
+  `articles/architecture/transactional-outbox`. The two route segments use
+  lowercase ASCII letters, digits, and single hyphens; the complete slug is at
+  most 255 characters. Article writes trim surrounding whitespace, lowercase,
+  replace whitespace with hyphens, and remove whitespace around `/` before
+  validating. Normalization never adds or removes semantic route segments.
+  Only non-archived items reserve a slug.
 - V1 persists article content only. Other content kinds need an explicit schema
   before they are added.
 - Lifecycle is `DRAFT`, `IN_REVIEW`, `PUBLISHED`, or `ARCHIVED`. Allowed
@@ -40,7 +43,9 @@ Both repositories keep independent copies of the same canonical JSON fixture:
   from content input. Existing rows receive a deterministic `legacy-<uuid>`
   slug; items with a published revision pointer retain `PUBLISHED` state, and
   other legacy items become `DRAFT`. Historical creator fields remain nullable
-  because their actors cannot be reconstructed.
+  because their actors cannot be reconstructed. These migration-generated
+  slugs are historical exceptions to the canonical article route and are
+  reported as preflight blockers until explicitly remediated.
 - Revisions are append-only and numbered per content identity.
 - Appending a revision requires the caller's `baseRevisionId`. The repository
   locks the content identity and compares it with `latest_revision_id` before
@@ -133,8 +138,11 @@ Web renderer apply the same limits:
   owning content identity.
 - The database rejects updates or deletes to revision and publication rows.
 - The database rejects changes to a content item's identity fields.
-- The database validates slug shape, reserved route roots, lifecycle values,
-  archive metadata consistency, and creator foreign keys. A partial unique
+- The current database constraint validates the broader historical slug
+  shape, lifecycle values, archive metadata consistency, and creator foreign
+  keys. Runtime article writes and public lookups enforce the exact canonical
+  article route. A later approved schema phase may tighten persistence after
+  the read-only route preflight and remediation decisions. A partial unique
   index prevents active slug collisions while allowing an archived route to be
   reused.
 - Item and revision creator attribution is immutable. Creator fields are
@@ -151,6 +159,9 @@ Web renderer apply the same limits:
   status before writing. Archive and restore never delete or rewrite revisions
   or publication rows.
 
-There is no public or administrative HTTP endpoint in this foundation. The
-permission-aware service and repository are the persistence boundary for the
-authoring phase.
+The read-only operator command `npm run content:route-preflight` classifies
+every stored article route and reports blockers and suggested-route collisions.
+It never rewrites slugs or changes lifecycle, publication history, or the active
+catalog snapshot. This phase does not add the final database route constraint
+or route-history redirect persistence; those changes require a reviewed
+remediation decision first.

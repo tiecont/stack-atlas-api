@@ -31,6 +31,7 @@
     "migration:verify": "node scripts/migrations/verify.mjs",
     "platform:authorization": "node scripts/identity/platform-authorization-admin.mjs",
     "content:git-import": "node scripts/content/catalog/git-import.mjs",
+    "content:route-preflight": "node scripts/content/catalog/route-preflight.mjs",
     "prepare": "node -e \"if (process.env.NODE_ENV !== 'production') require('child_process').execFileSync('husky', { stdio: 'inherit' })\""
   },
   "dependencies": {

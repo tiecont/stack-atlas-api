@@ -16,6 +16,7 @@ import type {
   PublicContentCatalogRecord,
   StoredPublicContentCatalog,
   ContentStatus,
+  ContentArticleRoutePreflightReport,
 } from '../types/content-catalog.types';
 import {
   CONTENT_STATUS,
@@ -26,13 +27,19 @@ import {
   ContentSearchValidationError,
   ContentCatalogNotReadyError,
   ContentCatalogSnapshotConflictError,
+  ContentRouteNotPublishableError,
 } from '../types/content-catalog.types';
 import {
   validateContentDocument,
   validateContentKey,
 } from '../types/content-document';
-import { normalizeContentSlug } from '../types/content-slug';
+import {
+  assertCanonicalArticleSlug,
+  isCanonicalArticleSlug,
+  normalizeArticleSlug,
+} from '../types/content-slug';
 import { checksumContent } from '../helpers/content-checksum';
+import { buildArticleRoutePreflightReport } from '../helpers/content-route-preflight';
 import {
   ContentCatalogSnapshotValidationError,
   validateContentCatalogSnapshot,
@@ -63,6 +70,7 @@ type ContentCatalogStore = Pick<
   | 'transitionStatus'
   | 'listContent'
   | 'listRevisions'
+  | 'listArticleRoutePreflightRows'
 >;
 
 type PlatformAuthorization = Pick<
@@ -103,7 +111,7 @@ export class ContentCatalogService {
   ): Promise<ContentRevisionRecord> {
     await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_CREATE);
     const validatedKey = validateContentKey(contentKey);
-    const validatedSlug = normalizeContentSlug(slug);
+    const validatedSlug = normalizeArticleSlug(slug);
     const validatedDocument = validateContentDocument(document);
     return this.repository.createArticle({
       contentKey: validatedKey,
@@ -127,7 +135,9 @@ export class ContentCatalogService {
     principal: AuthenticatedPrincipal,
   ): Promise<ContentImportState | null> {
     await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
-    return this.repository.findImportStateBySlug(normalizeContentSlug(slug));
+    return this.repository.findImportStateBySlug(
+      assertCanonicalArticleSlug(slug),
+    );
   }
 
   async findGitContentCatalogImportState(
@@ -192,7 +202,7 @@ export class ContentCatalogService {
       PLATFORM_PERMISSION.CONTENT_PUBLISH,
     ]);
     const contentKey = validateContentKey(input.contentKey);
-    const slug = normalizeContentSlug(input.slug);
+    const slug = assertCanonicalArticleSlug(input.slug);
     const document = validateContentDocument(input.document);
     assertAllowedTransition(CONTENT_STATUS.DRAFT, CONTENT_STATUS.IN_REVIEW);
     assertAllowedTransition(CONTENT_STATUS.IN_REVIEW, CONTENT_STATUS.PUBLISHED);
@@ -236,6 +246,9 @@ export class ContentCatalogService {
     );
     const item = await this.repository.findLifecycle(contentId);
     if (!item) throw new ContentItemNotFoundError();
+    if (item.contentType !== 'article' || !isCanonicalArticleSlug(item.slug)) {
+      throw new ContentRouteNotPublishableError();
+    }
     assertAllowedTransition(item.status, CONTENT_STATUS.PUBLISHED);
     const revision = await this.repository.findRevision(contentId, revisionId);
     if (!revision) throw new ContentRevisionNotFoundError();
@@ -489,7 +502,14 @@ export class ContentCatalogService {
   }
 
   findPublishedBySlug(slug: string): Promise<PublishedContentRecord | null> {
-    return this.repository.findPublishedBySlug(normalizeContentSlug(slug));
+    return this.repository.findPublishedBySlug(
+      assertCanonicalArticleSlug(slug),
+    );
+  }
+
+  async preflightArticleRoutes(): Promise<ContentArticleRoutePreflightReport> {
+    const rows = await this.repository.listArticleRoutePreflightRows();
+    return buildArticleRoutePreflightReport(rows);
   }
 
   private async transitionTo(

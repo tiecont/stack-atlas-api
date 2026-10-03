@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DatabaseService } from '../../../src/database/database.service.js';
+import { checksumContent } from '../../../src/modules/content/catalog/helpers/content-checksum.js';
 import { PlatformAuthorizationRepository } from '../../../src/modules/identity/platform-authorization/repositories/platform-authorization.repository.js';
 import { PlatformAuthorizationService } from '../../../src/modules/identity/platform-authorization/services/platform-authorization.service.js';
 import type { AuthenticatedPrincipal } from '../../../src/modules/identity/authentication/types/authenticated-principal.js';
@@ -12,6 +13,7 @@ import {
   ContentLifecycleTransitionError,
   ContentPermissionDeniedError,
   ContentRevisionConflictError,
+  ContentRouteNotPublishableError,
   ContentSlugConflictError,
 } from '../../../src/modules/content/catalog/types/content-catalog.types.js';
 import { ContentDocumentValidationError } from '../../../src/modules/content/catalog/types/content-document.js';
@@ -20,7 +22,7 @@ import type {
   GitContentSnapshot,
   GitContentSourceArticle,
 } from '../../../src/modules/content/catalog/types/git-content-import.types.js';
-import { ContentSlugValidationError } from '../../../src/modules/content/catalog/types/content-slug.js';
+import { ContentArticleRouteValidationError } from '../../../src/modules/content/catalog/types/content-slug.js';
 import { migrate } from '../../../scripts/migrations/runner.mjs';
 import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
@@ -41,7 +43,7 @@ describe('PostgreSQL content catalog lifecycle', () => {
     const actor = await createActor(pool!, true);
     const service = createService(pool!);
     const contentKey = `article:${randomUUID()}`;
-    const slug = `transactional-outbox-${randomUUID()}`;
+    const slug = `articles/architecture/transactional-outbox-${randomUUID()}`;
     const first = await service.createArticle(
       contentKey,
       slug.toUpperCase(),
@@ -228,7 +230,7 @@ describe('PostgreSQL content catalog lifecycle', () => {
     const actor = await createActor(pool!, true);
     const unprivileged = await createActor(pool!, false);
     const service = createService(pool!);
-    const slug = `unique-route-${randomUUID()}`;
+    const slug = `articles/architecture/unique-route-${randomUUID()}`;
     const first = await service.createArticle(
       `article:${randomUUID()}`,
       slug.toUpperCase(),
@@ -251,11 +253,11 @@ describe('PostgreSQL content catalog lifecycle', () => {
         makeDocument('Reserved route'),
         actor,
       ),
-    ).rejects.toBeInstanceOf(ContentSlugValidationError);
+    ).rejects.toBeInstanceOf(ContentArticleRouteValidationError);
     await expect(
       service.createArticle(
         `article:${randomUUID()}`,
-        'unsafe-link',
+        'articles/architecture/unsafe-link',
         makeDocument('Unsafe link', 'javascript:alert(1)'),
         actor,
       ),
@@ -263,7 +265,7 @@ describe('PostgreSQL content catalog lifecycle', () => {
     await expect(
       service.createArticle(
         `article:${randomUUID()}`,
-        'unauthorized-route',
+        'articles/architecture/unauthorized-route',
         makeDocument('No permission'),
         unprivileged,
       ),
@@ -291,11 +293,234 @@ describe('PostgreSQL content catalog lifecycle', () => {
     expect(stillArchived.rows[0]?.archived_at).toBeInstanceOf(Date);
   });
 
+  it('accepts canonical creates and rejects legacy creates before persistence', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+    const repository = new ContentCatalogRepository(
+      new DatabaseService(pool!),
+    );
+    const invalidKey = 'article:' + randomUUID();
+    await expect(
+      service.createArticle(
+        invalidKey,
+        'engineering/new-guide',
+        makeDocument('Invalid route'),
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ContentArticleRouteValidationError);
+
+    const invalidRows = await pool!.query<{
+      items: string;
+      revisions: string;
+    }>(
+      'SELECT (SELECT count(*)::text FROM stack_atlas.content_items WHERE content_key = $1) AS items, (SELECT count(*)::text FROM stack_atlas.content_revisions AS revision JOIN stack_atlas.content_items AS item ON item.id = revision.content_item_id WHERE item.content_key = $1) AS revisions',
+      [invalidKey],
+    );
+    expect(invalidRows.rows[0]).toEqual({ items: '0', revisions: '0' });
+
+    const contentKey = 'article:' + randomUUID();
+    const slug = 'articles/architecture/new-guide-' + randomUUID();
+    const created = await service.createArticle(
+      contentKey,
+      slug,
+      makeDocument('Canonical route'),
+      actor,
+    );
+    expect(created).toMatchObject({ contentKey, slug, status: 'DRAFT' });
+
+    const historicalDocument = validateContentDocument(
+      makeDocument('Historical route'),
+    );
+    const historical = await repository.createArticle({
+      contentKey: 'article:' + randomUUID(),
+      slug: 'legacy-domain/legacy-article-' + randomUUID(),
+      actorAccountId: actor.accountId,
+      document: historicalDocument,
+      checksumSha256: checksumContent(historicalDocument),
+    });
+    await service.submitForReview(historical.contentId, actor);
+    const before = await pool!.query<{
+      status: string;
+      published_revision_id: string | null;
+      publication_count: string;
+    }>(
+      'SELECT item.status, item.published_revision_id, count(publication.id)::text AS publication_count FROM stack_atlas.content_items AS item LEFT JOIN stack_atlas.content_publications AS publication ON publication.content_item_id = item.id WHERE item.id = $1 GROUP BY item.id',
+      [historical.contentId],
+    );
+
+    await expect(
+      service.publishRevision(
+        historical.contentId,
+        historical.revisionId,
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ContentRouteNotPublishableError);
+    const after = await pool!.query<{
+      status: string;
+      published_revision_id: string | null;
+      publication_count: string;
+    }>(
+      'SELECT item.status, item.published_revision_id, count(publication.id)::text AS publication_count FROM stack_atlas.content_items AS item LEFT JOIN stack_atlas.content_publications AS publication ON publication.content_item_id = item.id WHERE item.id = $1 GROUP BY item.id',
+      [historical.contentId],
+    );
+    expect(after.rows).toEqual(before.rows);
+    expect(after.rows[0]).toEqual({
+      status: 'IN_REVIEW',
+      published_revision_id: null,
+      publication_count: '0',
+    });
+  });
+
+  it('audits legacy routes and collisions without changing content or catalog state', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+    const repository = new ContentCatalogRepository(
+      new DatabaseService(pool!),
+    );
+    const suffix = randomUUID();
+    const suggestedSlug = 'articles/architecture/collision-' + suffix;
+    await service.createArticle(
+      'article:' + randomUUID(),
+      suggestedSlug,
+      makeDocument('Canonical route owner'),
+      actor,
+    );
+
+    const firstLegacyDocument = validateContentDocument(
+      makeDocument('Archived legacy route'),
+    );
+    const archivedLegacy = await repository.createArticle({
+      contentKey: 'article:' + randomUUID(),
+      slug: 'architecture/collision-' + suffix,
+      actorAccountId: actor.accountId,
+      document: firstLegacyDocument,
+      checksumSha256: checksumContent(firstLegacyDocument),
+    });
+    await service.archiveContent(archivedLegacy.contentId, actor);
+
+    const activeLegacyDocument = validateContentDocument(
+      makeDocument('Active legacy route'),
+    );
+    const activeLegacy = await repository.createArticle({
+      contentKey: 'article:' + randomUUID(),
+      slug: 'architecture/collision-' + suffix,
+      actorAccountId: actor.accountId,
+      document: activeLegacyDocument,
+      checksumSha256: checksumContent(activeLegacyDocument),
+    });
+
+    const generatedDocument = validateContentDocument(
+      makeDocument('Generated legacy route'),
+    );
+    const generated = await repository.createArticle({
+      contentKey: 'article:' + randomUUID(),
+      slug: 'legacy-' + randomUUID().replaceAll('-', ''),
+      actorAccountId: actor.accountId,
+      document: generatedDocument,
+      checksumSha256: checksumContent(generatedDocument),
+    });
+
+    const archivedDocument = validateContentDocument(
+      makeDocument('Archived invalid route'),
+    );
+    const archivedInvalid = await repository.createArticle({
+      contentKey: 'article:' + randomUUID(),
+      slug: 'old/archived-' + suffix,
+      actorAccountId: actor.accountId,
+      document: archivedDocument,
+      checksumSha256: checksumContent(archivedDocument),
+    });
+    await service.archiveContent(archivedInvalid.contentId, actor);
+
+    const publishedDocument = validateContentDocument(
+      makeDocument('Published invalid route'),
+    );
+    const publishedInvalid = await repository.createPublishedArticle({
+      contentKey: 'article:' + randomUUID(),
+      slug: 'published-domain/published-' + suffix,
+      actorAccountId: actor.accountId,
+      document: publishedDocument,
+      checksumSha256: checksumContent(publishedDocument),
+    });
+
+    const contentIds = [
+      archivedLegacy.contentId,
+      activeLegacy.contentId,
+      generated.contentId,
+      archivedInvalid.contentId,
+      publishedInvalid.contentId,
+    ].sort();
+    const readRows = () =>
+      pool!.query(
+        'SELECT id, content_key, content_type, slug, status, archived_at, published_revision_id FROM stack_atlas.content_items WHERE id = ANY($1::uuid[]) ORDER BY id',
+        [contentIds],
+      );
+    const readPublicationCounts = () =>
+      pool!.query(
+        'SELECT item.id, count(publication.id)::text AS publication_count FROM stack_atlas.content_items AS item LEFT JOIN stack_atlas.content_publications AS publication ON publication.content_item_id = item.id WHERE item.id = ANY($1::uuid[]) GROUP BY item.id ORDER BY item.id',
+        [contentIds],
+      );
+    const readActiveSnapshot = () =>
+      pool!.query(
+        'SELECT snapshot_id FROM stack_atlas.content_catalog_active_snapshot WHERE slot = 1',
+      );
+    const beforeRows = await readRows();
+    const beforePublications = await readPublicationCounts();
+    const beforeSnapshot = await readActiveSnapshot();
+
+    const report = await service.preflightArticleRoutes();
+
+    const afterRows = await readRows();
+    const afterPublications = await readPublicationCounts();
+    const afterSnapshot = await readActiveSnapshot();
+    expect(afterRows.rows).toEqual(beforeRows.rows);
+    expect(afterPublications.rows).toEqual(beforePublications.rows);
+    expect(afterSnapshot.rows).toEqual(beforeSnapshot.rows);
+    expect(report.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          contentId: activeLegacy.contentId,
+          classification: 'invalid_route',
+          reason: 'missing_articles_prefix',
+        }),
+        expect.objectContaining({
+          contentId: generated.contentId,
+          reason: 'legacy_generated_slug',
+        }),
+        expect.objectContaining({
+          contentId: archivedInvalid.contentId,
+          severity: 'BLOCKER',
+        }),
+        expect.objectContaining({
+          contentId: publishedInvalid.contentId,
+          status: 'PUBLISHED',
+          severity: 'BLOCKER',
+        }),
+      ]),
+    );
+    expect(report.suggestionCollisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'multiple_suggested_routes',
+          suggestedSlug,
+          candidateContentIds: [
+            archivedLegacy.contentId,
+            activeLegacy.contentId,
+          ].sort(),
+        }),
+        expect.objectContaining({
+          kind: 'active_canonical_route_owner',
+          suggestedSlug,
+        }),
+      ]),
+    );
+  });
+
   it('imports a published article atomically, verifies it, and rejects a conflicting rerun', async () => {
     const actor = await createActor(pool!, true);
     const service = createService(pool!);
     const contentKey = `article:git-import-${randomUUID()}`;
-    const slug = `articles/git-import-${randomUUID()}`;
+    const slug = `articles/architecture/git-import-${randomUUID()}`;
     const imported = await service.createPublishedGitImportArticle(
       { contentKey, slug, document: makeDocument('Imported article') },
       actor,
@@ -352,7 +577,7 @@ describe('PostgreSQL content catalog lifecycle', () => {
     const actor = await createActor(pool!, true);
     const service = createService(pool!);
     const contentKey = `article:git-import-rollback-${randomUUID()}`;
-    const slug = `articles/git-import-rollback-${randomUUID()}`;
+    const slug = `articles/architecture/git-import-rollback-${randomUUID()}`;
     await pool!.query(`
       CREATE OR REPLACE FUNCTION stack_atlas.fail_test_git_import_publication()
       RETURNS trigger LANGUAGE plpgsql AS $function$
@@ -607,7 +832,7 @@ function makeImportSnapshot(
   };
   return {
     repository: 'tiecont/stack-atlas',
-    commitSha: 'd'.repeat(40),
+    commitSha: randomUUID().replaceAll('-', '') + '0'.repeat(8),
     sourceRoot: '/tmp/stack-atlas-git-import-test',
     inventory: [
       {
