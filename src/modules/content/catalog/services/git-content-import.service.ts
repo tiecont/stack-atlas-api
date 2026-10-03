@@ -11,6 +11,7 @@ import type {
   GitContentSnapshot,
   GitContentSourceArticle,
 } from '../types/git-content-import.types';
+import { isCanonicalArticleSlug } from '../types/content-slug';
 
 type ContentImportCatalog = Pick<
   ContentCatalogService,
@@ -111,6 +112,17 @@ export class GitContentImportService {
             'failed',
             errors.map((error) => error.message).join('; ') ||
               'Article metadata did not produce an importable document.',
+          ),
+        });
+        continue;
+      }
+      if (!isCanonicalArticleSlug(article.slug)) {
+        planned.push({
+          article,
+          result: resultFor(
+            article,
+            'failed',
+            'The article route must match articles/<domain>/<slug>.',
           ),
         });
         continue;
