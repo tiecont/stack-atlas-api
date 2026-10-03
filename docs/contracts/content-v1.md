@@ -16,14 +16,16 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 
 - `content_key` is a stable, unique, lowercase key such as
   `article:transactional-outbox`.
-- `slug` is the canonical public article route identity and has exactly the
+- New article writes use the canonical public route identity with exactly the
   form `articles/<domain>/<slug>`, for example
   `articles/architecture/transactional-outbox`. The two route segments use
   lowercase ASCII letters, digits, and single hyphens; the complete slug is at
   most 255 characters. Article writes trim surrounding whitespace, lowercase,
   replace whitespace with hyphens, and remove whitespace around `/` before
   validating. Normalization never adds or removes semantic route segments.
-  Only non-archived items reserve a slug.
+  Only non-archived items reserve a slug. Until A01.2 remediation, historical
+  persisted rows may still contain non-canonical routes; Admin reads preserve
+  those values and public article projections exclude them.
 - V1 persists article content only. Other content kinds need an explicit schema
   before they are added.
 - Lifecycle is `DRAFT`, `IN_REVIEW`, `PUBLISHED`, or `ARCHIVED`. Allowed
@@ -140,8 +142,10 @@ Web renderer apply the same limits:
 - The database rejects changes to a content item's identity fields.
 - The current database constraint validates the broader historical slug
   shape, lifecycle values, archive metadata consistency, and creator foreign
-  keys. Runtime article writes and public lookups enforce the exact canonical
-  article route. A later approved schema phase may tighten persistence after
+  keys. Runtime article writes, public lookups, and public search/catalog
+  projections enforce exact canonical route eligibility. Admin responses
+  preserve historical slug values while A01.2 remediation is pending. A later
+  approved schema phase may tighten persistence after
   the read-only route preflight and remediation decisions. A partial unique
   index prevents active slug collisions while allowing an archived route to be
   reused.

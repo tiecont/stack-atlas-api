@@ -516,6 +516,183 @@ describe('PostgreSQL content catalog lifecycle', () => {
     );
   });
 
+  it('excludes historical published routes from search and catalog without mutating stored state', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+    const repository = new ContentCatalogRepository(
+      new DatabaseService(pool!),
+    );
+    const suffix = randomUUID().replaceAll('-', '');
+    const searchToken = `routefilter-${suffix}`;
+    const canonicalSourceId = `canonical-${suffix}`;
+    const legacySourceId = `legacy-${suffix}`;
+    const canonicalContentKey = `article:${canonicalSourceId}`;
+    const legacyContentKey = `article:${legacySourceId}`;
+    const canonicalSlug = `articles/architecture/${canonicalSourceId}`;
+    const legacySlug = `engineering/legacy-${suffix}`;
+
+    const canonical = await service.createPublishedGitImportArticle(
+      {
+        contentKey: canonicalContentKey,
+        slug: canonicalSlug,
+        document: makeDocument(`Canonical ${searchToken} guide`),
+      },
+      actor,
+    );
+    const legacyDocument = validateContentDocument(
+      makeDocument(`Legacy ${searchToken} guide`),
+    );
+    const legacy = await repository.createPublishedArticle({
+      contentKey: legacyContentKey,
+      slug: legacySlug,
+      actorAccountId: actor.accountId,
+      document: legacyDocument,
+      checksumSha256: checksumContent(legacyDocument),
+    });
+
+    const catalogSnapshot = {
+      schema_version: 1,
+      site: {
+        name: 'Stack Atlas',
+        description: 'Engineering knowledge.',
+        language: 'vi',
+      },
+      topics: [],
+      categories: [{ id: 'engineering', title: 'Engineering' }],
+      paths: [
+        {
+          id: 'backend',
+          title: 'Backend',
+          description: 'Backend learning path.',
+          legacyIndexUrls: [],
+          modules: [
+            {
+              id: 'foundations',
+              title: 'Foundations',
+              order: 1,
+              domain: 'architecture',
+              category: 'engineering',
+              articleIds: [legacySourceId, canonicalSourceId],
+              legacyIndexUrls: [],
+            },
+          ],
+        },
+      ],
+      articles: [
+        {
+          sourceId: legacySourceId,
+          contentKey: legacyContentKey,
+          domain: 'architecture',
+          category: 'engineering',
+          tags: [],
+          difficulty: 'unspecified',
+          learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
+          prerequisites: [],
+          related: [],
+          labs: [],
+          authors: [],
+          kubernetes: null,
+          review: null,
+          legacyUrls: [`/season-01-guides/${legacySourceId}.html`],
+        },
+        {
+          sourceId: canonicalSourceId,
+          contentKey: canonicalContentKey,
+          domain: 'architecture',
+          category: 'engineering',
+          tags: [],
+          difficulty: 'unspecified',
+          learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
+          prerequisites: [legacySourceId],
+          related: [legacySourceId],
+          labs: [],
+          authors: [],
+          kubernetes: null,
+          review: null,
+          legacyUrls: [`/season-01-guides/${canonicalSourceId}.html`],
+        },
+      ],
+      redirects: [],
+    };
+    const sourceCommitSha =
+      randomUUID().replaceAll('-', '') + '0'.repeat(8);
+    await service.storeGitContentCatalogSnapshot(
+      sourceCommitSha,
+      catalogSnapshot,
+      actor,
+    );
+
+    const readContentRows = () =>
+      pool!.query<{
+        id: string;
+        content_key: string;
+        slug: string;
+        status: string;
+        archived_at: Date | null;
+        published_revision_id: string | null;
+      }>(
+        `SELECT id, content_key, slug, status, archived_at,
+                published_revision_id
+         FROM stack_atlas.content_items
+         WHERE id = ANY($1::uuid[])
+         ORDER BY id`,
+        [[canonical.contentId, legacy.contentId]],
+      );
+    const readSnapshot = () =>
+      pool!.query<{ catalog: unknown; checksum_sha256: string }>(
+        `SELECT snapshot.catalog, snapshot.checksum_sha256
+         FROM stack_atlas.content_catalog_snapshots AS snapshot
+         WHERE snapshot.source_commit_sha = $1`,
+        [sourceCommitSha],
+      );
+    const beforeRows = await readContentRows();
+    const beforeSnapshot = await readSnapshot();
+
+    const searchResults = await service.searchPublishedContent(searchToken);
+    expect(searchResults.map((result) => result.contentId)).toEqual([
+      canonical.contentId,
+    ]);
+    expect(searchResults.every((result) => result.slug === canonicalSlug)).toBe(
+      true,
+    );
+
+    const publicCatalog = await service.getPublicContentCatalog();
+    expect(publicCatalog.articles.map((article) => article.sourceId)).toEqual([
+      canonicalSourceId,
+    ]);
+    expect(publicCatalog.articles[0]).toMatchObject({
+      prerequisites: [],
+      related: [],
+    });
+    expect(publicCatalog.paths[0]?.modules[0]?.articleIds).toEqual([
+      canonicalSourceId,
+    ]);
+    expect(publicCatalog.redirects).toContainEqual({
+      source: `/season-01-guides/${canonicalSourceId}.html`,
+      destination: `/${canonicalSlug}/`,
+      kind: 'article',
+    });
+    expect(publicCatalog.redirects).not.toContainEqual(
+      expect.objectContaining({
+        source: `/season-01-guides/${legacySourceId}.html`,
+      }),
+    );
+
+    const afterRows = await readContentRows();
+    const afterSnapshot = await readSnapshot();
+    expect(afterRows.rows).toEqual(beforeRows.rows);
+    expect(afterRows.rows).toContainEqual(
+      expect.objectContaining({
+        id: legacy.contentId,
+        slug: legacySlug,
+        status: 'PUBLISHED',
+        archived_at: null,
+      }),
+    );
+    expect(afterSnapshot.rows).toEqual(beforeSnapshot.rows);
+    expect(afterSnapshot.rows[0]?.catalog).toEqual(catalogSnapshot);
+  });
+
   it('imports a published article atomically, verifies it, and rejects a conflicting rerun', async () => {
     const actor = await createActor(pool!, true);
     const service = createService(pool!);

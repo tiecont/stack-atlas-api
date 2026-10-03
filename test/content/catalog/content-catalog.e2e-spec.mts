@@ -12,6 +12,10 @@ import { ContentCatalogRepository } from '../../../src/modules/content/catalog/r
 import { PlatformAuthorizationService } from '../../../src/modules/identity/platform-authorization/services/platform-authorization.service.js';
 import { ContentCatalogService } from '../../../src/modules/content/catalog/services/content-catalog.service.js';
 import { validateContentDocument } from '../../../src/modules/content/catalog/types/content-document.js';
+import {
+  CANONICAL_ARTICLE_SLUG_PATTERN,
+  isCanonicalArticleSlug,
+} from '../../../src/modules/content/catalog/types/content-slug.js';
 import { migrate } from '../../../scripts/migrations/runner.mjs';
 import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
@@ -457,35 +461,116 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     const sessionId = session.rows[0]?.id;
     if (!sessionId) throw new Error('Expected an active editor session.');
     const sourceId = contentKey.slice('article:'.length);
+    const legacySourceId = `legacy-${randomUUID().replaceAll('-', '')}`;
+    const legacyContentKey = `article:${legacySourceId}`;
+    const legacySlug = `engineering/legacy-${randomUUID().replaceAll('-', '')}`;
+    const legacyDocument = validateContentDocument(
+      contentDocument('Legacy Second revision'),
+    );
+    const legacyPublished = await app
+      .get(ContentCatalogRepository)
+      .createPublishedArticle({
+        contentKey: legacyContentKey,
+        slug: legacySlug,
+        actorAccountId: publisher.accountId,
+        document: legacyDocument,
+        checksumSha256: checksumContent(legacyDocument),
+      });
+    const canonicalLegacyUrl = `/season-01-guides/${sourceId}.html`;
+    const legacyLegacyUrl = `/season-01-guides/${legacySourceId}.html`;
     const sourceCommitSha = `${randomUUID().replaceAll('-', '')}${'0'.repeat(8)}`;
-    await app.get(ContentCatalogService).storeGitContentCatalogSnapshot(
-      sourceCommitSha,
-      {
-        schema_version: 1,
-        site: { name: 'Stack Atlas', description: 'Engineering knowledge.', language: 'vi' },
-        topics: [{ id: 'architecture', title: 'Architecture', description: 'System boundaries.' }],
-        categories: [{ id: 'engineering', title: 'Engineering' }],
-        paths: [],
-        articles: [{
-          sourceId,
-          contentKey,
+    const catalogSnapshot = {
+      schema_version: 1,
+      site: { name: 'Stack Atlas', description: 'Engineering knowledge.', language: 'vi' },
+      topics: [{ id: 'architecture', title: 'Architecture', description: 'System boundaries.' }],
+      categories: [{ id: 'engineering', title: 'Engineering' }],
+      paths: [{
+        id: 'backend',
+        title: 'Backend',
+        description: 'Backend learning path.',
+        legacyIndexUrls: [],
+        modules: [{
+          id: 'foundations',
+          title: 'Foundations',
+          order: 1,
+          domain: 'architecture',
+          category: 'engineering',
+          articleIds: [legacySourceId, sourceId],
+          legacyIndexUrls: [],
+        }],
+      }],
+      articles: [
+        {
+          sourceId: legacySourceId,
+          contentKey: legacyContentKey,
           domain: 'architecture',
           category: 'engineering',
           tags: ['e2e'],
           difficulty: 'unspecified',
-          learningPaths: [],
+          learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
           prerequisites: [],
           related: [],
           labs: [],
           authors: ['test'],
           kubernetes: null,
           review: null,
-          legacyUrls: [],
-        }],
-        redirects: [],
-      },
+          legacyUrls: [legacyLegacyUrl],
+        },
+        {
+          sourceId,
+          contentKey,
+          domain: 'architecture',
+          category: 'engineering',
+          tags: ['e2e'],
+          difficulty: 'unspecified',
+          learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
+          prerequisites: [legacySourceId],
+          related: [legacySourceId],
+          labs: [],
+          authors: ['test'],
+          kubernetes: null,
+          review: null,
+          legacyUrls: [canonicalLegacyUrl],
+        },
+      ],
+      redirects: [],
+    };
+    await app.get(ContentCatalogService).storeGitContentCatalogSnapshot(
+      sourceCommitSha,
+      catalogSnapshot,
       { accountId: publisher.accountId, sessionId, email: publisher.email },
     );
+    const legacyAdminItem = await request(app.getHttpServer())
+      .get(`/api/v1/admin/content/${legacyPublished.contentId}`)
+      .set('Cookie', editor.cookie)
+      .expect(200);
+    expect(legacyAdminItem.body).toMatchObject({
+      contentId: legacyPublished.contentId,
+      slug: legacySlug,
+      status: 'PUBLISHED',
+    });
+    const legacyAdminRevision = await request(app.getHttpServer())
+      .get(
+        `/api/v1/admin/content/${legacyPublished.contentId}/revisions/${legacyPublished.revisionId}`,
+      )
+      .set('Cookie', editor.cookie)
+      .expect(200);
+    expect(legacyAdminRevision.body.slug).toBe(legacySlug);
+
+    const contentRowsBeforePublicReads = await pool.query(
+      `SELECT id, slug, status, archived_at, published_revision_id
+       FROM stack_atlas.content_items
+       WHERE id = ANY($1::uuid[])
+       ORDER BY id`,
+      [[contentId, legacyPublished.contentId]],
+    );
+    const snapshotBeforePublicReads = await pool.query(
+      `SELECT catalog, checksum_sha256
+       FROM stack_atlas.content_catalog_snapshots
+       WHERE source_commit_sha = $1`,
+      [sourceCommitSha],
+    );
+
     const publicCatalog = await request(app.getHttpServer())
       .get('/api/v1/content/catalog')
       .expect(200)
@@ -504,8 +589,33 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
         publishedRevisionId: secondRevisionId,
         title: 'Second revision',
       }],
-      redirects: [],
     });
+    expect(publicCatalog.body.articles).toHaveLength(1);
+    expect(
+      publicCatalog.body.articles.every((article: { slug: unknown }) =>
+        isCanonicalArticleSlug(article.slug),
+      ),
+    ).toBe(true);
+    expect(publicCatalog.body.paths[0].modules[0].articleIds).toEqual([
+      sourceId,
+    ]);
+    expect(publicCatalog.body.articles[0]).toMatchObject({
+      prerequisites: [],
+      related: [],
+    });
+    expect(publicCatalog.body.redirects).toContainEqual({
+      source: canonicalLegacyUrl,
+      destination: `/${slug}/`,
+      kind: 'article',
+    });
+    expect(publicCatalog.body.redirects).not.toContainEqual(
+      expect.objectContaining({ source: legacyLegacyUrl }),
+    );
+    expect(
+      publicCatalog.body.redirects.some((redirect: { destination: string }) =>
+        redirect.destination.includes(legacySlug),
+      ),
+    ).toBe(false);
 
     const search = await request(app.getHttpServer())
       .get('/api/v1/content/search')
@@ -524,6 +634,34 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       }),
     ]);
     expect(search.body.items[0]).not.toHaveProperty('document');
+    expect(search.body.items).toHaveLength(1);
+    expect(
+      search.body.items.every((item: { slug: unknown }) =>
+        isCanonicalArticleSlug(item.slug),
+      ),
+    ).toBe(true);
+    expect(search.body.items.map((item: { contentId: string }) => item.contentId)).toEqual([
+      contentId,
+    ]);
+    const contentRowsAfterPublicReads = await pool.query(
+      `SELECT id, slug, status, archived_at, published_revision_id
+       FROM stack_atlas.content_items
+       WHERE id = ANY($1::uuid[])
+       ORDER BY id`,
+      [[contentId, legacyPublished.contentId]],
+    );
+    const snapshotAfterPublicReads = await pool.query(
+      `SELECT catalog, checksum_sha256
+       FROM stack_atlas.content_catalog_snapshots
+       WHERE source_commit_sha = $1`,
+      [sourceCommitSha],
+    );
+    expect(contentRowsAfterPublicReads.rows).toEqual(
+      contentRowsBeforePublicReads.rows,
+    );
+    expect(snapshotAfterPublicReads.rows).toEqual(
+      snapshotBeforePublicReads.rows,
+    );
     await request(app.getHttpServer())
       .get('/api/v1/content/search')
       .query({ q: 'x'.repeat(161) })
@@ -792,9 +930,34 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       schemas?.['ContentItemResponseDto'],
       'properties',
     );
-    expect(recordProperty(itemProperties, 'slug')?.['pattern']).toContain(
-      '^articles/',
+    const itemSlug = recordProperty(itemProperties, 'slug');
+    expect(itemSlug?.['pattern']).toBeUndefined();
+    expect(itemSlug?.['description']).toContain('New writes are canonical');
+    expect(itemSlug?.['description']).toContain(
+      'historical rows may remain non-canonical until A01.2 remediation',
     );
+    const revisionProperties = recordProperty(
+      schemas?.['ContentRevisionResponseDto'],
+      'properties',
+    );
+    const revisionSlug = recordProperty(revisionProperties, 'slug');
+    expect(revisionSlug?.['pattern']).toBeUndefined();
+    expect(revisionSlug?.['description']).toContain(
+      'historical rows may remain non-canonical until A01.2 remediation',
+    );
+    expect(
+      JSON.stringify(schemas?.['PublishedContentResponseDto']),
+    ).not.toContain(CANONICAL_ARTICLE_SLUG_PATTERN);
+    for (const schemaName of [
+      'PublicContentResponseDto',
+      'PublicContentSearchItemResponseDto',
+      'PublicCatalogArticleResponseDto',
+    ]) {
+      const properties = recordProperty(schemas?.[schemaName], 'properties');
+      expect(recordProperty(properties, 'slug')?.['pattern']).toBe(
+        CANONICAL_ARTICLE_SLUG_PATTERN,
+      );
+    }
     for (const schemaName of ['CreateContentDto', 'CreateContentRevisionDto']) {
       const properties = recordProperty(schemas?.[schemaName], 'properties');
       const document = recordProperty(properties, 'document');

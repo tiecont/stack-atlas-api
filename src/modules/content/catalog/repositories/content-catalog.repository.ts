@@ -236,6 +236,7 @@ export class ContentCatalogRepository {
               WITH ORDINALITY AS source(metadata, position)
          JOIN stack_atlas.content_items AS item
            ON item.content_key = source.metadata->>'contentKey'
+          AND item.content_type = 'article'
           AND item.status = 'PUBLISHED'
           AND item.archived_at IS NULL
          JOIN stack_atlas.content_revisions AS revision
@@ -764,6 +765,7 @@ export class ContentCatalogRepository {
          ) AS searchable_text
        ) AS search
        WHERE item.status = 'PUBLISHED'
+         AND item.content_type = 'article'
          AND item.archived_at IS NULL
          AND position(lower($1) in lower(search.searchable_text)) > 0
        ORDER BY

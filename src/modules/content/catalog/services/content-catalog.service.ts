@@ -93,6 +93,8 @@ const ALLOWED_TRANSITIONS: Readonly<
 
 const MAX_PUBLIC_SEARCH_QUERY_LENGTH = 160;
 const MAX_PUBLIC_SEARCH_RESULTS = 20;
+// Legacy non-canonical published rows can rank ahead of valid routes until A01.2 remediation.
+const MAX_PUBLIC_SEARCH_CANDIDATES = 100;
 
 @Injectable()
 export class ContentCatalogService {
@@ -339,10 +341,13 @@ export class ContentCatalogService {
     }
     const normalizedQuery = query.trim();
     if (!normalizedQuery) return [];
-    return this.repository.searchPublishedContent(
+    const candidates = await this.repository.searchPublishedContent(
       normalizedQuery,
-      MAX_PUBLIC_SEARCH_RESULTS,
+      MAX_PUBLIC_SEARCH_CANDIDATES,
     );
+    return candidates
+      .filter((candidate) => isCanonicalArticleSlug(candidate.slug))
+      .slice(0, MAX_PUBLIC_SEARCH_RESULTS);
   }
 
   async getPublicContentCatalog(): Promise<PublicContentCatalogRecord> {
@@ -364,10 +369,16 @@ export class ContentCatalogService {
     const metadataByKey = new Map(
       catalog.articles.map((article) => [article.contentKey, article]),
     );
-    const publishedByKey = new Map(
-      stored.publishedArticles.map((article) => [article.contentKey, article]),
+    const canonicalPublishedArticles = stored.publishedArticles.filter(
+      (article) => isCanonicalArticleSlug(article.slug),
     );
-    const articles = stored.publishedArticles.flatMap((published) => {
+    const publishedByKey = new Map(
+      canonicalPublishedArticles.map((article) => [
+        article.contentKey,
+        article,
+      ]),
+    );
+    const articles = canonicalPublishedArticles.flatMap((published) => {
       const metadata = metadataByKey.get(published.contentKey);
       if (!metadata) return [];
       return [

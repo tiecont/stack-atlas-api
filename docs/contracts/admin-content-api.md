@@ -38,7 +38,7 @@ archived item remains available through the lifecycle service and is not part
 of this HTTP surface.
 
 Create accepts `contentKey`, `slug`, and a validated Content Document V1
-`document`. The persisted article slug is exactly
+`document`. New article writes persist a canonical slug with exactly
 `articles/<domain>/<slug>`; `domain` and the final segment use lowercase
 ASCII letters, digits, and single hyphens. Create normalizes case and
 whitespace before checking that route shape, but it never invents a route
@@ -46,6 +46,12 @@ prefix. Revision append accepts a required `baseRevisionId` and `document`.
 The authenticated principal supplies creator, reviewer-transition, publisher,
 and archiver identity; request bodies cannot select an actor. Cursor and page
 size are bounded, and list status filters use the lifecycle enum.
+
+During the A01.1 transition, historical rows may still store non-canonical
+slugs until A01.2 remediation. Admin item, revision, and lifecycle responses
+return that persisted route identity as stored. Public lookup, search, and
+catalog projections expose canonical article routes only; this filtering
+does not change or archive historical rows.
 
 ## Concurrency And Publication
 
@@ -70,7 +76,9 @@ revision matching its published pointer. There is no fallback to the latest
 draft. Archiving preserves revision and publication history while removing the
 item from public lookup. Public search uses that same published pointer,
 searches the slug and document text, ranks title matches first, bounds the query
-to 160 characters, and returns at most 20 summaries without document bodies.
+to 160 characters, and returns at most 20 canonical-route summaries without
+document bodies. Public catalog article, path membership, relation, and
+article-redirect projections use the same canonical-route eligibility rule.
 Public lookup accepts only a URL-encoded canonical article slug. Malformed or
 non-article route shapes return `400 invalid_content_route`; a valid
 canonical route that is missing, unpublished, or archived keeps the existing

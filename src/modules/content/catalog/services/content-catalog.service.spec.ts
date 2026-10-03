@@ -3,6 +3,7 @@ import { PLATFORM_PERMISSION } from '../../../identity/platform-authorization/co
 import type { PlatformAuthorizationService } from '../../../identity/platform-authorization/services/platform-authorization.service';
 import { ContentCatalogService } from './content-catalog.service';
 import type { ContentCatalogRepository } from '../repositories/content-catalog.repository';
+import type { PublishedContentRecord } from '../types/content-catalog.types';
 import {
   CONTENT_STATUS,
   ContentLifecycleTransitionError,
@@ -11,7 +12,10 @@ import {
   ContentCatalogSnapshotConflictError,
   ContentRouteNotPublishableError,
 } from '../types/content-catalog.types';
-import { ContentDocumentValidationError } from '../types/content-document';
+import {
+  ContentDocumentValidationError,
+  validateContentDocument,
+} from '../types/content-document';
 import { ContentArticleRouteValidationError } from '../types/content-slug';
 import type { AuthenticatedPrincipal } from '../../../identity/authentication/types/authenticated-principal';
 import { checksumContent } from '../helpers/content-checksum';
@@ -112,6 +116,26 @@ function lifecycle(status: keyof typeof CONTENT_STATUS) {
     archivedBy: null,
     createdAt: new Date('2026-09-30T00:00:00.000Z'),
     updatedAt: new Date('2026-09-30T00:00:00.000Z'),
+  };
+}
+
+function publishedContent(slug: string, index: number): PublishedContentRecord {
+  return {
+    contentId: `content-${index}`,
+    contentKey: `article:content-${index}`,
+    contentType: 'article',
+    slug,
+    status: CONTENT_STATUS.PUBLISHED,
+    createdBy: principal.accountId,
+    revisionCreatedBy: principal.accountId,
+    revisionId: `revision-${index}`,
+    revisionNumber: 1,
+    schemaVersion: 1,
+    checksumSha256: 'a'.repeat(64),
+    document: validateContentDocument(document),
+    createdAt: new Date('2026-10-02T00:00:00.000Z'),
+    publishedAt: new Date('2026-10-02T00:00:00.000Z'),
+    publishedBy: principal.accountId,
   };
 }
 
@@ -359,11 +383,41 @@ describe('ContentCatalogService', () => {
     expect(await service.searchPublishedContent('  transaction  ')).toEqual([]);
     expect(repository.searchPublishedContent).toHaveBeenCalledWith(
       'transaction',
-      20,
+      100,
     );
     expect(await service.searchPublishedContent('   ')).toEqual([]);
     expect(await service.searchPublishedContent(undefined)).toEqual([]);
     expect(repository.searchPublishedContent).toHaveBeenCalledOnce();
+  });
+
+  it('filters legacy search candidates before returning up to twenty canonical matches', async () => {
+    const repository = createRepository();
+    const invalidCandidates = Array.from({ length: 12 }, (_, index) =>
+      publishedContent(`engineering/legacy-guide-${index}`, index),
+    );
+    const canonicalCandidates = Array.from({ length: 25 }, (_, index) =>
+      publishedContent(
+        `articles/architecture/canonical-guide-${index}`,
+        index + invalidCandidates.length,
+      ),
+    );
+    repository.searchPublishedContent.mockResolvedValue([
+      ...invalidCandidates,
+      ...canonicalCandidates,
+    ]);
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    const results = await service.searchPublishedContent('guide');
+
+    expect(repository.searchPublishedContent).toHaveBeenCalledWith(
+      'guide',
+      100,
+    );
+    expect(results).toEqual(canonicalCandidates.slice(0, 20));
+    expect(results).toHaveLength(20);
   });
 
   it('rejects malformed and oversized public content queries', async () => {
@@ -442,13 +496,13 @@ describe('ContentCatalogService', () => {
           tags: [],
           difficulty: 'unspecified',
           learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
-          prerequisites: [],
-          related: [],
+          prerequisites: ['alpha'],
+          related: ['alpha'],
           labs: [],
           authors: [],
           kubernetes: null,
           review: null,
-          legacyUrls: [],
+          legacyUrls: ['/season-01-fundamentals/beta.html'],
         },
       ],
       redirects: [],
@@ -463,9 +517,18 @@ describe('ContentCatalogService', () => {
         {
           contentId: 'content-alpha',
           contentKey: 'article:alpha',
-          slug: 'articles/architecture/alpha',
+          slug: 'engineering/legacy-alpha',
           publishedRevisionId: 'revision-alpha',
-          title: 'Alpha from published revision',
+          title: 'Legacy Alpha from published revision',
+          description: 'Published description.',
+          publishedAt: new Date('2026-10-02T00:00:00.000Z'),
+        },
+        {
+          contentId: 'content-beta',
+          contentKey: 'article:beta',
+          slug: 'articles/architecture/beta',
+          publishedRevisionId: 'revision-beta',
+          title: 'Beta from published revision',
           description: 'Published description.',
           publishedAt: new Date('2026-10-02T00:00:00.000Z'),
         },
@@ -480,17 +543,23 @@ describe('ContentCatalogService', () => {
 
     expect(result.articles).toHaveLength(1);
     expect(result.articles[0]).toMatchObject({
-      sourceId: 'alpha',
-      title: 'Alpha from published revision',
-      url: '/articles/architecture/alpha/',
+      sourceId: 'beta',
+      title: 'Beta from published revision',
+      url: '/articles/architecture/beta/',
+      prerequisites: [],
       related: [],
     });
-    expect(result.paths[0]?.modules[0]?.articleIds).toEqual(['alpha']);
+    expect(result.paths[0]?.modules[0]?.articleIds).toEqual(['beta']);
     expect(result.redirects).toContainEqual({
-      source: '/season-01-fundamentals/alpha.html',
-      destination: '/articles/architecture/alpha/',
+      source: '/season-01-fundamentals/beta.html',
+      destination: '/articles/architecture/beta/',
       kind: 'article',
     });
+    expect(result.redirects).not.toContainEqual(
+      expect.objectContaining({
+        source: '/season-01-fundamentals/alpha.html',
+      }),
+    );
   });
 
   it('reports catalog service unavailability before the first verified import', async () => {
