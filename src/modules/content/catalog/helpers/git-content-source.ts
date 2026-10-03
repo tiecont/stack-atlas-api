@@ -23,6 +23,12 @@ import type {
   GitContentSnapshot,
   GitContentSourceArticle,
 } from '../types/git-content-import.types';
+import type {
+  ContentCatalogPathV1,
+  ContentCatalogSnapshotV1 as CatalogSnapshot,
+  ContentCatalogTopicV1,
+} from '../types/content-catalog.types';
+import { validateContentCatalogSnapshot } from '../types/content-catalog-snapshot';
 import { normalizeContentSlug } from '../types/content-slug';
 
 const SOURCE_REPOSITORY = 'tiecont/stack-atlas';
@@ -257,6 +263,13 @@ export async function parseGitContentSnapshot(
     }
     pathIds.add(pathRecord.id);
   }
+  const catalog = readCatalogSnapshot(
+    contentRoot,
+    root,
+    rawArticles,
+    pathRecords,
+    sourceErrors,
+  );
   return {
     repository: SOURCE_REPOSITORY,
     commitSha,
@@ -264,8 +277,317 @@ export async function parseGitContentSnapshot(
     inventory,
     articles: rawArticles.map((entry) => entry.article),
     pathRecords,
+    catalog,
     sourceErrors,
   };
+}
+
+function readCatalogSnapshot(
+  contentRoot: string,
+  sourceRoot: string,
+  rawArticles: RawArticle[],
+  pathRecords: GitContentSnapshot['pathRecords'],
+  sourceErrors: GitContentImportIssue[],
+): CatalogSnapshot {
+  const sitePath = path.join(contentRoot, 'site.yaml');
+  const categoriesPath = path.join(contentRoot, 'categories.yaml');
+  let site: CatalogSnapshot['site'] = {
+    name: '',
+    description: '',
+    language: '',
+  };
+  let topics: ContentCatalogTopicV1[] = [];
+  let categories: CatalogSnapshot['categories'] = [];
+
+  try {
+    const record = asRecord(parseYaml(readBoundedFile(sitePath)));
+    if (!record) throw new Error('Site metadata must contain an object.');
+    assertAllowedKeys(record, [
+      'name',
+      'description',
+      'language',
+      'base_url',
+      'base_path',
+    ]);
+    if (
+      typeof record['name'] !== 'string' ||
+      typeof record['description'] !== 'string' ||
+      typeof record['language'] !== 'string'
+    ) {
+      throw new Error(
+        'Site metadata requires name, description, and language strings.',
+      );
+    }
+    site = {
+      name: record['name'],
+      description: record['description'],
+      language: record['language'],
+    };
+  } catch (error) {
+    sourceErrors.push(
+      issue(
+        'invalid_site_metadata',
+        errorMessage(error),
+        toSourcePath(sourceRoot, sitePath),
+      ),
+    );
+  }
+
+  const domainsRoot = path.join(contentRoot, 'domains');
+  if (statSync(domainsRoot, { throwIfNoEntry: false })?.isDirectory()) {
+    topics = walkFiles(domainsRoot)
+      .filter((file) => /\.ya?ml$/i.test(file))
+      .sort()
+      .flatMap((file) => {
+        const sourcePath = toSourcePath(sourceRoot, file);
+        try {
+          const record = asRecord(parseYaml(readBoundedFile(file)));
+          if (!record)
+            throw new Error('Topic metadata must contain an object.');
+          assertAllowedKeys(record, [
+            'id',
+            'title',
+            'description',
+            'status',
+            'icon',
+          ]);
+          const id = nonEmptyString(record['id']);
+          const title = nonEmptyString(record['title']);
+          const description = nonEmptyString(record['description']);
+          if (!id || !title || !description) {
+            throw new Error(
+              'Topic metadata requires id, title, and description strings.',
+            );
+          }
+          if (
+            (record['status'] !== undefined &&
+              typeof record['status'] !== 'string') ||
+            (record['icon'] !== undefined && typeof record['icon'] !== 'string')
+          ) {
+            throw new Error(
+              'Topic status and icon must be strings when provided.',
+            );
+          }
+          return [
+            {
+              id,
+              title,
+              description,
+              ...(typeof record['status'] === 'string'
+                ? { status: record['status'] }
+                : {}),
+              ...(typeof record['icon'] === 'string'
+                ? { icon: record['icon'] }
+                : {}),
+            },
+          ];
+        } catch (error) {
+          sourceErrors.push(
+            issue('invalid_topic_metadata', errorMessage(error), sourcePath),
+          );
+          return [];
+        }
+      });
+  } else {
+    sourceErrors.push(
+      issue(
+        'missing_topic_metadata',
+        'The content/domains directory is missing.',
+        toSourcePath(sourceRoot, domainsRoot),
+      ),
+    );
+  }
+
+  try {
+    const value: unknown = parseYaml(readBoundedFile(categoriesPath));
+    if (!Array.isArray(value))
+      throw new Error('Category metadata must contain an array.');
+    categories = value.map((entry, index) => {
+      const record = asRecord(entry);
+      if (!record)
+        throw new Error(`Category at index ${index} must be an object.`);
+      assertAllowedKeys(record, ['id', 'title']);
+      const id = nonEmptyString(record['id']);
+      const title = nonEmptyString(record['title']);
+      if (!id || !title)
+        throw new Error(
+          `Category at index ${index} requires id and title strings.`,
+        );
+      return { id, title };
+    });
+  } catch (error) {
+    sourceErrors.push(
+      issue(
+        'invalid_category_metadata',
+        errorMessage(error),
+        toSourcePath(sourceRoot, categoriesPath),
+      ),
+    );
+  }
+
+  const articles = rawArticles.flatMap(({ article }) => {
+    const relationships = article.relationships;
+    if (!article.sourceId || !article.contentKey || !relationships.domain)
+      return [];
+    return [
+      {
+        sourceId: article.sourceId,
+        contentKey: article.contentKey,
+        domain: relationships.domain,
+        category: relationships.category,
+        tags: relationships.tags,
+        difficulty: relationships.difficulty ?? 'unspecified',
+        learningPaths: relationships.learningPaths,
+        prerequisites: relationships.prerequisites,
+        related: relationships.related,
+        labs: relationships.labs,
+        authors: relationships.authors,
+        kubernetes: relationships.kubernetes,
+        review: relationships.review,
+        legacyUrls: relationships.legacyUrls,
+      },
+    ];
+  });
+  const paths: ContentCatalogPathV1[] = pathRecords.map((pathRecord) => ({
+    id: pathRecord.id,
+    title: pathRecord.title,
+    description: pathRecord.description,
+    ...(pathRecord.status === undefined ? {} : { status: pathRecord.status }),
+    ...(pathRecord.domain === undefined ? {} : { domain: pathRecord.domain }),
+    ...(pathRecord.difficulty === undefined
+      ? {}
+      : { difficulty: pathRecord.difficulty }),
+    legacyIndexUrls: pathRecord.legacyIndexUrls,
+    modules: pathRecord.modules.map((module) => ({
+      id: module.id,
+      title: module.title,
+      order: module.order,
+      domain: module.domain,
+      category: module.category,
+      ...(module.group === undefined ? {} : { group: module.group }),
+      articleIds: module.articleIds,
+      legacyIndexUrls: module.legacyIndexUrls,
+    })),
+  }));
+  const redirects = buildCatalogRedirects(
+    rawArticles.map(({ article }) => article),
+    paths,
+    sourceRoot,
+    sourceErrors,
+  );
+  const candidate = {
+    schema_version: 1,
+    site,
+    topics,
+    categories,
+    paths,
+    articles,
+    redirects,
+  };
+  try {
+    return validateContentCatalogSnapshot(candidate);
+  } catch (error) {
+    sourceErrors.push(
+      issue(
+        'invalid_public_catalog',
+        errorMessage(error),
+        toSourcePath(sourceRoot, contentRoot),
+      ),
+    );
+    return candidate as CatalogSnapshot;
+  }
+}
+
+function buildCatalogRedirects(
+  articles: GitContentSourceArticle[],
+  paths: ContentCatalogPathV1[],
+  sourceRoot: string,
+  sourceErrors: GitContentImportIssue[],
+): CatalogSnapshot['redirects'] {
+  const redirects: CatalogSnapshot['redirects'] = [];
+  const add = (
+    source: string,
+    destination: string,
+    kind: 'article' | 'path-module',
+    sourcePath: string,
+  ) => {
+    const sourcePattern =
+      kind === 'article'
+        ? /^\/season-\d{2}-[a-z0-9-]+\/[a-z0-9-]+\.html$/
+        : /^\/season-\d{2}-[a-z0-9-]+\/index\.html$/;
+    if (
+      !sourcePattern.test(source) ||
+      source.includes('..') ||
+      source.includes('\\')
+    ) {
+      sourceErrors.push(
+        issue(
+          'invalid_legacy_redirect',
+          `Unsupported legacy route ${source}.`,
+          sourcePath,
+        ),
+      );
+      return;
+    }
+    redirects.push({ source, destination, kind });
+  };
+  for (const article of articles) {
+    if (!article.slug) continue;
+    for (const source of article.relationships.legacyUrls) {
+      add(
+        source,
+        `/${article.slug}/`,
+        'article',
+        article.sourceFiles[0] ?? 'content/articles',
+      );
+    }
+  }
+  for (const learningPath of paths) {
+    for (const source of learningPath.legacyIndexUrls) {
+      add(
+        source,
+        `/paths/${learningPath.id}/`,
+        'path-module',
+        `content/paths/${learningPath.id}.yaml`,
+      );
+    }
+    for (const module of learningPath.modules) {
+      for (const source of module.legacyIndexUrls) {
+        add(
+          source,
+          `/paths/${learningPath.id}/#module-${module.id}`,
+          'path-module',
+          `content/paths/${learningPath.id}.yaml`,
+        );
+      }
+    }
+  }
+  const seen = new Set<string>();
+  for (const redirect of redirects) {
+    if (seen.has(redirect.source)) {
+      sourceErrors.push(
+        issue(
+          'duplicate_legacy_redirect',
+          `Legacy route ${redirect.source} is defined more than once.`,
+          redirect.source,
+        ),
+      );
+    }
+    seen.add(redirect.source);
+  }
+  const sourceSet = new Set(redirects.map((redirect) => redirect.source));
+  for (const redirect of redirects) {
+    if (sourceSet.has(redirect.destination.split('#', 1)[0] ?? '')) {
+      sourceErrors.push(
+        issue(
+          'legacy_redirect_chain',
+          `Legacy redirect ${redirect.source} points to another legacy route.`,
+          redirect.source,
+        ),
+      );
+    }
+  }
+  return redirects;
 }
 
 function assertSourceCheckout(root: string): string {
@@ -357,6 +679,15 @@ function sourceArticle(
     }
   }
   validateRelationshipMetadata(metadata, yamlPath, article.errors);
+  if (!article.relationships.domain) {
+    article.errors.push(
+      issue(
+        'missing_article_topic',
+        'Article metadata requires a domain for public catalog membership.',
+        yamlPath,
+      ),
+    );
+  }
   if (
     metadata['schema_version'] !== undefined &&
     metadata['schema_version'] !== 1
@@ -578,6 +909,51 @@ function readPathRecords(
           );
           return [];
         }
+        assertAllowedKeys(record, [
+          'id',
+          'title',
+          'description',
+          'status',
+          'domain',
+          'difficulty',
+          'modules',
+          'legacy_index_urls',
+        ]);
+        const title = nonEmptyString(record['title']);
+        const description = nonEmptyString(record['description']);
+        if (!title || !description) {
+          throw new Error(
+            'Learning path metadata requires title and description strings.',
+          );
+        }
+        if (
+          (record['status'] !== undefined &&
+            typeof record['status'] !== 'string') ||
+          (record['domain'] !== undefined &&
+            typeof record['domain'] !== 'string')
+        ) {
+          throw new Error(
+            'Learning path status and domain must be strings when provided.',
+          );
+        }
+        let difficulty: { start: string; end: string } | undefined;
+        if (record['difficulty'] !== undefined) {
+          const difficultyRecord = asRecord(record['difficulty']);
+          if (
+            !difficultyRecord ||
+            typeof difficultyRecord['start'] !== 'string' ||
+            typeof difficultyRecord['end'] !== 'string'
+          ) {
+            throw new Error(
+              'Learning path difficulty requires start and end strings.',
+            );
+          }
+          assertAllowedKeys(difficultyRecord, ['start', 'end']);
+          difficulty = {
+            start: difficultyRecord['start'],
+            end: difficultyRecord['end'],
+          };
+        }
         if (!Array.isArray(record['modules'])) {
           sourceErrors.push(
             issue(
@@ -609,12 +985,18 @@ function readPathRecords(
         for (const [index, value] of record['modules'].entries()) {
           const module = asRecord(value);
           const moduleId = nonEmptyString(module?.['id']);
+          const moduleTitle = nonEmptyString(module?.['title']);
+          const moduleDomain = nonEmptyString(module?.['domain']);
+          const moduleCategory = nonEmptyString(module?.['category']);
           const order = module?.['order'];
           const articleIds = module?.['article_ids'];
           const legacyUrls = module?.['legacy_index_urls'];
           if (
             !module ||
             !moduleId ||
+            !moduleTitle ||
+            !moduleDomain ||
+            !moduleCategory ||
             typeof order !== 'number' ||
             !Number.isInteger(order) ||
             !Array.isArray(articleIds) ||
@@ -627,6 +1009,29 @@ function readPathRecords(
               issue(
                 'invalid_path_module',
                 `Path module at index ${index} requires id, integer order, article_ids, and valid legacy_index_urls.`,
+                sourcePath,
+              ),
+            );
+            continue;
+          }
+          assertAllowedKeys(module, [
+            'id',
+            'title',
+            'order',
+            'domain',
+            'category',
+            'group',
+            'article_ids',
+            'legacy_index_urls',
+          ]);
+          if (
+            module['group'] !== undefined &&
+            typeof module['group'] !== 'string'
+          ) {
+            sourceErrors.push(
+              issue(
+                'invalid_path_module',
+                `Path module at index ${index} group must be a string.`,
                 sourcePath,
               ),
             );
@@ -645,8 +1050,15 @@ function readPathRecords(
           moduleIds.add(moduleId);
           modules.push({
             id: moduleId,
+            title: moduleTitle,
             order,
+            domain: moduleDomain,
+            category: moduleCategory,
+            ...(typeof module['group'] === 'string'
+              ? { group: module['group'] }
+              : {}),
             articleIds: articleIds as string[],
+            legacyIndexUrls: (legacyUrls as string[] | undefined) ?? [],
             sourceMetadata: module,
           });
         }
@@ -654,6 +1066,15 @@ function readPathRecords(
         return [
           {
             id,
+            title,
+            description,
+            ...(typeof record['status'] === 'string'
+              ? { status: record['status'] }
+              : {}),
+            ...(typeof record['domain'] === 'string'
+              ? { domain: record['domain'] }
+              : {}),
+            ...(difficulty ? { difficulty } : {}),
             sourcePath,
             sourceMetadata: Object.fromEntries(
               Object.entries(record).filter(([key]) => key !== 'modules'),
@@ -1602,6 +2023,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function assertAllowedKeys(
+  value: Record<string, unknown>,
+  allowed: string[],
+): void {
+  const unsupported = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unsupported)
+    throw new Error(`Metadata field ${unsupported} has no importer mapping.`);
 }
 
 function nonEmptyString(value: unknown): string | null {

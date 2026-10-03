@@ -98,12 +98,14 @@ The Engine is not needed for health or identity and is not a startup dependency.
 
 The API owns stable article identity, Content Document V1 revisions,
 publication history, and the admin HTTP API in PostgreSQL. Web Git remains the
-canonical authored source until a separate cutover. The explicit Git importer
-can copy published articles from a clean, pinned Web commit; it does not change
-Web runtime reads or delete Git content. See
+canonical source for supplemental catalog metadata until its separate
+cutover. The explicit importer can copy published articles and preserve a
+validated catalog snapshot from a clean, pinned Web commit; it does not change
+filesystem runtime reads or delete Git content. See
 [`docs/architecture/content-platform.md`](docs/architecture/content-platform.md),
 [`docs/contracts/content-v1.md`](docs/contracts/content-v1.md), and
-[`docs/operations/git-content-import.md`](docs/operations/git-content-import.md).
+[`docs/contracts/public-content-catalog-v1.md`](docs/contracts/public-content-catalog-v1.md),
+and [`docs/operations/git-content-import.md`](docs/operations/git-content-import.md).
 
 See [`docs/contracts/identity-v1.md`](docs/contracts/identity-v1.md) for the
 stable endpoint and cookie contract.

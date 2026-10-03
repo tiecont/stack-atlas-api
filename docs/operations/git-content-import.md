@@ -1,18 +1,19 @@
 # Git Content Import
 
-The importer is an explicit operator command for moving published articles
-from Web Git into API/PostgreSQL. It does not change Web runtime reads, remove
-source files, or create a synchronization job. Web Git remains canonical until
-a separately approved cutover.
+The importer is an explicit operator command for moving published articles and
+their supplemental catalog snapshot from Web Git into API/PostgreSQL. It does
+not switch Web filesystem runtime reads, remove source files, or create a
+synchronization job. Web Git remains canonical until a separately approved
+catalog cutover.
 
-The API currently persists article identity, slug, Content Document V1,
-immutable revision, and publication history. Taxonomy, path/module membership,
-prerequisites, labs, author/difficulty/review metadata, and legacy redirects
-are not persisted. The report retains these source values as relationship
-gaps. Unsupported HTML is reported; executable or invalid content prevents the
-apply preflight from writing. SVG is retained as inert code and called out in
-the report. Imported creator and publication timestamps identify the operator
-and import time, not the historical Git author or original publication time.
+The API persists article identity, slug, Content Document V1, immutable
+revision, and publication history. A separate immutable snapshot preserves
+site, topic, category, path/module, relationship, and legacy redirect metadata
+from the exact source commit. The report retains unsupported HTML and
+unresolved references. Executable or invalid content prevents apply from
+activating the snapshot. SVG is retained as inert code and called out in the
+report. Imported creator and publication timestamps identify the operator and
+import time, not the historical Git author or original publication time.
 
 ## Preconditions
 
@@ -77,10 +78,12 @@ npm run content:git-import -- dry-run \
 ```
 
 The command writes JSON and Markdown reports with the repository, exact source
-SHA, per-file SHA-256 inventory, article results, unsupported constructs, and
-relationship gaps. Review all warnings and gaps. A nonzero exit or any failed
-article blocks apply. Warnings may describe content intentionally flattened
-or represented as inert code; decide that each is acceptable before applying.
+SHA, per-file SHA-256 inventory, article results, catalog checksum/status,
+unsupported constructs, and relationship mismatches. Review all warnings and
+gaps. A nonzero exit or any failed article blocks apply. An apply also refuses
+to activate a snapshot with unresolved catalog references. Warnings may
+describe content intentionally flattened or represented as inert code; decide
+that each is acceptable before applying.
 
 ## Apply
 
@@ -97,11 +100,14 @@ npm run content:git-import -- apply \
 The command recomputes the snapshot and checks the confirmation before opening
 the API application context or making database writes. It preflights every
 article first. Any source error, permission failure, or conflicting existing
-identity prevents all writes during that preflight. Each new article, first
+identity, duplicate published source slug, or slug owned by another active
+content item prevents all writes during that preflight. Each new article, first
 revision, lifecycle transitions, publication record, and published pointer
-then commits in one PostgreSQL transaction. Processing stops at the first
+then commits in one PostgreSQL transaction per article. After all article
+writes succeed, the immutable catalog snapshot and active-snapshot pointer are
+written together in a separate transaction. Processing stops at the first
 write failure; items committed earlier remain committed and later items are
-marked skipped. There is no whole-snapshot transaction.
+marked skipped. There is no whole-source transaction.
 
 ## Idempotency And Recovery
 
@@ -113,10 +119,12 @@ source SHA after resolving the reported cause. Matching items become no-ops
 and the remaining items resume. A concurrent import may report a deterministic
 identity conflict; rerun after the other command completes.
 
-The importer does not delete or rewrite items, revisions, or publication
-history. For incorrect content, stop imports and use the normal authorized
-content lifecycle or the documented incident recovery process. Do not edit
-immutable rows directly. No schema migration is required.
+The importer does not delete or rewrite items, revisions, publication history,
+or stored catalog snapshots. Activating a later source SHA changes only the
+active-snapshot pointer after preflight succeeds. For incorrect content, stop
+imports and use the normal authorized content lifecycle or the documented
+incident recovery process. Do not edit immutable rows directly. Applying a
+snapshot requires the catalog schema migration to be present.
 
 ## Verification
 
@@ -131,6 +139,9 @@ npm run content:git-import -- verify \
 
 Verification checks every importable published article against its content
 identity, slug, published state, latest/published revision pointer, and
-canonical V1 checksum. Missing or changed records fail the command. This
-verifies API persistence only; it does not switch Web reads or claim parity for
-relationships the current API model cannot store.
+canonical V1 checksum. It also checks that the active snapshot has the same
+source SHA and catalog checksum. Missing or changed records fail the command.
+This verifies API persistence only; it does not switch Web reads. Before the
+Web filesystem runtime is removed, compare the API catalog response with the
+same Web commit for article/topic/path counts, ordering, URLs, relationships,
+redirects, search, and SEO, then retain both the dry-run and verify reports.

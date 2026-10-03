@@ -283,6 +283,213 @@ export class PublicContentSearchResponseDto {
   items!: PublicContentSearchItemResponseDto[];
 }
 
+export class PublicCatalogSiteResponseDto {
+  @ApiProperty({ maxLength: 160 })
+  name!: string;
+
+  @ApiProperty({ maxLength: 500 })
+  description!: string;
+
+  @ApiProperty({ maxLength: 32 })
+  language!: string;
+}
+
+export class PublicCatalogTopicResponseDto {
+  @ApiProperty({ maxLength: 128 })
+  id!: string;
+
+  @ApiProperty({ maxLength: 160 })
+  title!: string;
+
+  @ApiProperty({ maxLength: 2000 })
+  description!: string;
+
+  @ApiPropertyOptional({ maxLength: 32 })
+  status?: string;
+
+  @ApiPropertyOptional({ maxLength: 80 })
+  icon?: string;
+}
+
+export class PublicCatalogCategoryResponseDto {
+  @ApiProperty({ maxLength: 128 })
+  id!: string;
+
+  @ApiProperty({ maxLength: 160 })
+  title!: string;
+}
+
+export class PublicCatalogPathModuleResponseDto {
+  @ApiProperty({ maxLength: 128 })
+  id!: string;
+
+  @ApiProperty({ maxLength: 160 })
+  title!: string;
+
+  @ApiProperty({ minimum: 1 })
+  order!: number;
+
+  @ApiProperty({ maxLength: 128 })
+  domain!: string;
+
+  @ApiProperty({ maxLength: 128 })
+  category!: string;
+
+  @ApiPropertyOptional({ maxLength: 160 })
+  group?: string;
+
+  @ApiProperty({ type: [String], maxItems: 500 })
+  articleIds!: string[];
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  legacyIndexUrls!: string[];
+}
+
+export class PublicCatalogPathResponseDto {
+  @ApiProperty({ maxLength: 128 })
+  id!: string;
+
+  @ApiProperty({ maxLength: 160 })
+  title!: string;
+
+  @ApiProperty({ maxLength: 2000 })
+  description!: string;
+
+  @ApiPropertyOptional({ maxLength: 32 })
+  status?: string;
+
+  @ApiPropertyOptional({ maxLength: 128 })
+  domain?: string;
+
+  @ApiPropertyOptional({
+    type: 'object',
+    additionalProperties: { type: 'string' },
+  })
+  difficulty?: { start: string; end: string };
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  legacyIndexUrls!: string[];
+
+  @ApiProperty({ type: [PublicCatalogPathModuleResponseDto], maxItems: 500 })
+  modules!: PublicCatalogPathModuleResponseDto[];
+}
+
+export class PublicCatalogArticleResponseDto {
+  @ApiProperty({ maxLength: 128 })
+  sourceId!: string;
+
+  @ApiProperty({ maxLength: 255 })
+  contentKey!: string;
+
+  @ApiProperty({ maxLength: 128 })
+  domain!: string;
+
+  @ApiPropertyOptional({ maxLength: 128, nullable: true })
+  category!: string | null;
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  tags!: string[];
+
+  @ApiProperty({ maxLength: 32 })
+  difficulty!: string;
+
+  @ApiProperty({ type: 'array', items: { type: 'object' }, maxItems: 100 })
+  learningPaths!: { pathId: string; moduleId: string }[];
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  prerequisites!: string[];
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  related!: string[];
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  labs!: string[];
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  authors!: string[];
+
+  @ApiPropertyOptional({
+    type: 'object',
+    additionalProperties: true,
+    nullable: true,
+  })
+  kubernetes!: Record<string, unknown> | null;
+
+  @ApiPropertyOptional({
+    type: 'object',
+    additionalProperties: true,
+    nullable: true,
+  })
+  review!: Record<string, unknown> | null;
+
+  @ApiProperty({ type: [String], maxItems: 100 })
+  legacyUrls!: string[];
+
+  @ApiProperty({ format: 'uuid' })
+  contentId!: string;
+
+  @ApiProperty({ maxLength: 2048 })
+  slug!: string;
+
+  @ApiProperty({ maxLength: 160 })
+  title!: string;
+
+  @ApiProperty({ maxLength: 500 })
+  description!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  publishedRevisionId!: string;
+
+  @ApiProperty({ format: 'date-time' })
+  publishedAt!: string;
+
+  @ApiProperty({ maxLength: 2048 })
+  url!: string;
+}
+
+export class PublicCatalogRedirectResponseDto {
+  @ApiProperty({ maxLength: 512 })
+  source!: string;
+
+  @ApiProperty({ maxLength: 512 })
+  destination!: string;
+
+  @ApiProperty({ enum: ['article', 'path-module'] })
+  kind!: 'article' | 'path-module';
+}
+
+export class PublicContentCatalogResponseDto {
+  @ApiProperty({ enum: [1] })
+  schema_version!: 1;
+
+  @ApiProperty({ pattern: '^[a-f0-9]{40}$' })
+  sourceCommitSha!: string;
+
+  @ApiProperty({ pattern: '^[a-f0-9]{64}$' })
+  checksumSha256!: string;
+
+  @ApiProperty({ format: 'date-time' })
+  generatedAt!: string;
+
+  @ApiProperty({ type: PublicCatalogSiteResponseDto })
+  site!: PublicCatalogSiteResponseDto;
+
+  @ApiProperty({ type: [PublicCatalogTopicResponseDto], maxItems: 200 })
+  topics!: PublicCatalogTopicResponseDto[];
+
+  @ApiProperty({ type: [PublicCatalogCategoryResponseDto], maxItems: 500 })
+  categories!: PublicCatalogCategoryResponseDto[];
+
+  @ApiProperty({ type: [PublicCatalogPathResponseDto], maxItems: 100 })
+  paths!: PublicCatalogPathResponseDto[];
+
+  @ApiProperty({ type: [PublicCatalogArticleResponseDto], maxItems: 1000 })
+  articles!: PublicCatalogArticleResponseDto[];
+
+  @ApiProperty({ type: [PublicCatalogRedirectResponseDto], maxItems: 10000 })
+  redirects!: PublicCatalogRedirectResponseDto[];
+}
+
 export class ContentSeoResponseDto {
   @ApiProperty({ maxLength: 160 })
   title!: string;

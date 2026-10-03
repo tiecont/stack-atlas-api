@@ -8,6 +8,7 @@ import { configureHttp } from '../../../src/app.config.js';
 import { AppModule } from '../../../src/app.module.js';
 import { DATABASE_POOL } from '../../../src/database/database.constants.js';
 import { PlatformAuthorizationService } from '../../../src/modules/identity/platform-authorization/services/platform-authorization.service.js';
+import { ContentCatalogService } from '../../../src/modules/content/catalog/services/content-catalog.service.js';
 import { migrate } from '../../../scripts/migrations/runner.mjs';
 import { requirePostgresTestDatabaseUrl } from '../../postgres-test-safety.js';
 
@@ -45,7 +46,7 @@ function recordProperty(
 async function createAccountAndLogin(
   app: INestApplication,
   label: string,
-): Promise<{ accountId: string; cookie: string }> {
+): Promise<{ accountId: string; cookie: string; email: string }> {
   const email = `${label}-${randomUUID()}@example.test`;
   const password = 'a-test-password-with-enough-length';
   const created = await request(app.getHttpServer())
@@ -63,7 +64,7 @@ async function createAccountAndLogin(
     item.startsWith('stack_atlas_session='),
   );
   if (!cookie) throw new Error('Login did not issue the session cookie.');
-  return { accountId, cookie: cookie.split(';', 1)[0]! };
+  return { accountId, cookie: cookie.split(';', 1)[0]!, email };
 }
 
 function contentDocument(title: string): Record<string, unknown> {
@@ -124,6 +125,15 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
   });
 
   it('enforces permissions and completes create, revision, review, publish, public read, and archive', async () => {
+    const catalogNotReady = await request(app.getHttpServer())
+      .get('/api/v1/content/catalog')
+      .expect(503)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(catalogNotReady.body).toMatchObject({
+      code: 'content_catalog_not_ready',
+      status: 503,
+    });
+
     const anonymous = await request(app.getHttpServer())
       .get('/api/v1/admin/content')
       .expect(401);
@@ -142,6 +152,11 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     );
     await authorization.changeRoleAssignment(
       publisher.accountId,
+      'content-editor',
+      true,
+    );
+    await authorization.changeRoleAssignment(
+      publisher.accountId,
       'content-publisher',
       true,
     );
@@ -153,13 +168,14 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       .expect('Content-Type', /application\/problem\+json/);
 
     const slug = `e2e/${randomUUID()}`;
+    const contentKey = `article:${randomUUID()}`;
     const firstDocument = contentDocument('First revision');
     const created = await request(app.getHttpServer())
       .post('/api/v1/admin/content')
       .set('Origin', allowedOrigin)
       .set('Cookie', editor.cookie)
       .send({
-        contentKey: `article:${randomUUID()}`,
+        contentKey,
         slug,
         document: firstDocument,
       })
@@ -429,6 +445,65 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     });
     expect(publicContent.body).not.toHaveProperty('html');
 
+    const session = await pool.query<{ id: string }>(
+      `SELECT id FROM stack_atlas.sessions
+       WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()
+       ORDER BY expires_at DESC LIMIT 1`,
+      [publisher.accountId],
+    );
+    const sessionId = session.rows[0]?.id;
+    if (!sessionId) throw new Error('Expected an active editor session.');
+    const sourceId = contentKey.slice('article:'.length);
+    const sourceCommitSha = `${randomUUID().replaceAll('-', '')}${'0'.repeat(8)}`;
+    await app.get(ContentCatalogService).storeGitContentCatalogSnapshot(
+      sourceCommitSha,
+      {
+        schema_version: 1,
+        site: { name: 'Stack Atlas', description: 'Engineering knowledge.', language: 'vi' },
+        topics: [{ id: 'architecture', title: 'Architecture', description: 'System boundaries.' }],
+        categories: [{ id: 'engineering', title: 'Engineering' }],
+        paths: [],
+        articles: [{
+          sourceId,
+          contentKey,
+          domain: 'architecture',
+          category: 'engineering',
+          tags: ['e2e'],
+          difficulty: 'unspecified',
+          learningPaths: [],
+          prerequisites: [],
+          related: [],
+          labs: [],
+          authors: ['test'],
+          kubernetes: null,
+          review: null,
+          legacyUrls: [],
+        }],
+        redirects: [],
+      },
+      { accountId: publisher.accountId, sessionId, email: publisher.email },
+    );
+    const publicCatalog = await request(app.getHttpServer())
+      .get('/api/v1/content/catalog')
+      .expect(200)
+      .expect('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+    expect(publicCatalog.body).toMatchObject({
+      schema_version: 1,
+      sourceCommitSha,
+      site: { name: 'Stack Atlas', language: 'vi' },
+      topics: [{ id: 'architecture' }],
+      categories: [{ id: 'engineering' }],
+      articles: [{
+        sourceId,
+        contentKey,
+        contentId,
+        slug,
+        publishedRevisionId: secondRevisionId,
+        title: 'Second revision',
+      }],
+      redirects: [],
+    });
+
     const search = await request(app.getHttpServer())
       .get('/api/v1/content/search')
       .query({ q: 'Second revision body' })
@@ -476,6 +551,10 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       .query({ q: 'Second revision body' })
       .expect(200);
     expect(archivedSearch.body.items).toEqual([]);
+    const archivedCatalog = await request(app.getHttpServer())
+      .get('/api/v1/content/catalog')
+      .expect(200);
+    expect(archivedCatalog.body.articles).toEqual([]);
     await request(app.getHttpServer())
       .get(`/api/v1/content/${encodeURIComponent(secondContent.body.slug)}`)
       .expect(404);
@@ -505,6 +584,7 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       ['/api/v1/admin/content/{id}/publish', 'post'],
       ['/api/v1/admin/content/{id}/archive', 'post'],
       ['/api/v1/content/{slug}', 'get'],
+      ['/api/v1/content/catalog', 'get'],
       ['/api/v1/content/search', 'get'],
     ];
     for (const [path, method] of requiredPaths) {

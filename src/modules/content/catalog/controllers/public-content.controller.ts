@@ -7,6 +7,7 @@ import {
   ApiParam,
   ApiQuery,
   ApiResponse,
+  ApiServiceUnavailableResponse,
   ApiTags,
 } from '@nestjs/swagger';
 import { ProblemDetailsDto } from '../../../../common/openapi/problem-details.dto';
@@ -19,6 +20,7 @@ import {
   PublicContentResponseDto,
   PublicContentSearchItemResponseDto,
   PublicContentSearchResponseDto,
+  PublicContentCatalogResponseDto,
 } from '../dto/content-catalog.dto';
 import { withContentProblems } from '../helpers/content-http-problems';
 import { ContentItemNotFoundError } from '../types/content-catalog.types';
@@ -29,6 +31,7 @@ import { ContentItemNotFoundError } from '../types/content-catalog.types';
   ContentDocumentResponseDto,
   ContentSeoResponseDto,
   PublicContentSearchItemResponseDto,
+  PublicContentCatalogResponseDto,
 )
 @Controller('content')
 export class PublicContentController {
@@ -49,6 +52,36 @@ export class PublicContentController {
           toPublicContentSearchItem,
         ),
       }))(),
+    );
+  }
+
+  @Get('catalog')
+  @Header('Cache-Control', 'public, max-age=60, stale-while-revalidate=300')
+  @ApiOperation({ summary: 'Get the published content catalog metadata' })
+  @ApiOkResponse({ type: PublicContentCatalogResponseDto })
+  @ApiServiceUnavailableResponse(
+    problemDetailsResponse(
+      503,
+      'Public content catalog is not ready or failed integrity validation',
+    ),
+  )
+  getPublicCatalog(): Promise<PublicContentCatalogResponseDto> {
+    return withContentProblems(
+      (async () => {
+        const catalog = await this.catalog.getPublicContentCatalog();
+        return {
+          schema_version: catalog.schema_version,
+          sourceCommitSha: catalog.sourceCommitSha,
+          checksumSha256: catalog.checksumSha256,
+          generatedAt: catalog.createdAt.toISOString(),
+          site: catalog.site,
+          topics: catalog.topics,
+          categories: catalog.categories,
+          paths: catalog.paths,
+          articles: catalog.articles,
+          redirects: catalog.redirects,
+        };
+      })(),
     );
   }
 

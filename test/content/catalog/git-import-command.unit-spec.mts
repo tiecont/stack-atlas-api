@@ -67,6 +67,10 @@ describe('Git content import command', () => {
         unsupportedConstructs: 0,
         relationshipMismatches: 0,
       },
+      catalogSnapshot: {
+        status: 'ready',
+        checksumSha256: 'e'.repeat(64),
+      },
       articles: [],
       unsupportedConstructs: [],
       relationshipMismatches: [],

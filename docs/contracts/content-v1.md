@@ -51,12 +51,15 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 - Publication history is append-only. The current published revision points to
   one immutable revision belonging to the same content identity.
 - The operator Git importer creates published article revisions through the
-  catalog service and records the source SHA, file inventory, and relationship
-  or unsupported-construct gaps. Import does not switch Web runtime reads or
-  remove Git content. Admin HTTP routes check current platform permissions and
-  call the catalog service; public HTTP reads return only active published
-  revisions. HTTP responses contain structured Content Document V1 data,
-  never rendered HTML.
+  catalog service and records the source SHA and file inventory. Supplemental
+  site, taxonomy, path, relationship, and redirect metadata is preserved in a
+  separately validated immutable catalog snapshot. Unsupported source
+  constructs and unresolved references remain explicit in the import report.
+  Import does not switch Web filesystem runtime reads or delete Git content.
+  See [`public-content-catalog-v1.md`](public-content-catalog-v1.md). Admin
+  HTTP routes check current platform permissions and call the catalog service;
+  public HTTP reads return only active published revisions. HTTP article
+  responses contain structured Content Document V1 data, never rendered HTML.
 
 ## Document
 

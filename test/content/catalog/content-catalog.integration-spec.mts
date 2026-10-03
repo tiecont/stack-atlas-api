@@ -319,6 +319,9 @@ describe('PostgreSQL content catalog lifecycle', () => {
       publishedRevisionId: imported.revisionId,
       latestRevisionChecksumSha256: imported.checksumSha256,
     });
+    await expect(
+      service.findGitImportStateBySlug(slug, actor),
+    ).resolves.toMatchObject({ contentKey, slug });
 
     const publicationHistory = await pool!.query<{ count: string }>(
       `SELECT count(*)::text AS count
@@ -388,7 +391,8 @@ describe('PostgreSQL content catalog lifecycle', () => {
 
   it('runs dry-run, apply, idempotent rerun, and verify against PostgreSQL', async () => {
     const actor = await createActor(pool!, true);
-    const importer = new GitContentImportService(createService(pool!));
+    const service = createService(pool!);
+    const importer = new GitContentImportService(service);
     const sourceId = `git-import-${randomUUID()}`;
     const contentKey = `article:${sourceId}`;
     const slug = `articles/imported/${sourceId}`;
@@ -397,18 +401,49 @@ describe('PostgreSQL content catalog lifecycle', () => {
     const dryRun = await importer.run(snapshot, 'dry-run', actor);
     expect(dryRun.articles[0]?.status).toBe('ready');
     expect(dryRun.summary.imported).toBe(0);
+    expect(dryRun.catalogSnapshot.status).toBe('ready');
+    expect(dryRun.summary.relationshipMismatches).toBe(0);
 
     const applied = await importer.run(snapshot, 'apply', actor);
     expect(applied.articles[0]?.status).toBe('imported');
     expect(applied.summary.imported).toBe(1);
+    expect(applied.catalogSnapshot.status).toBe('imported');
 
     const repeated = await importer.run(snapshot, 'apply', actor);
     expect(repeated.articles[0]?.status).toBe('already_imported');
     expect(repeated.summary.imported).toBe(0);
+    expect(repeated.catalogSnapshot.status).toBe('already_imported');
 
     const verified = await importer.run(snapshot, 'verify', actor);
     expect(verified.articles[0]?.status).toBe('verified');
     expect(verified.source.commitSha).toBe(snapshot.commitSha);
+    expect(verified.catalogSnapshot.status).toBe('verified');
+
+    const catalogState = await service.findGitContentCatalogImportState(
+      snapshot.commitSha,
+      actor,
+    );
+    expect(catalogState).toMatchObject({
+      sourceCommitSha: snapshot.commitSha,
+      isActive: true,
+    });
+    const publicCatalog = await service.getPublicContentCatalog();
+    expect(publicCatalog.articles).toMatchObject([
+      {
+        sourceId,
+        contentKey,
+        domain: 'systems',
+        category: 'engineering',
+        title: 'Imported article',
+        url: `/${slug}/`,
+      },
+    ]);
+    expect(publicCatalog.paths[0]?.modules[0]?.articleIds).toEqual([sourceId]);
+    expect(publicCatalog.redirects).toContainEqual({
+      source: `/season-10-distributed-systems/${sourceId}.html`,
+      destination: `/${slug}/`,
+      kind: 'article',
+    });
 
     const persisted = await pool!.query<{
       status: string;
@@ -433,6 +468,14 @@ describe('PostgreSQL content catalog lifecycle', () => {
     expect(persisted.rows[0]?.latest_revision_id).toBe(
       persisted.rows[0]?.published_revision_id,
     );
+
+    const importedState = await service.findGitImportState(contentKey, actor);
+    if (!importedState) throw new Error('Expected imported content state.');
+    await service.archiveContent(importedState.contentId, actor);
+    const archivedCatalog = await service.getPublicContentCatalog();
+    expect(archivedCatalog.articles).toEqual([]);
+    expect(archivedCatalog.paths[0]?.modules[0]?.articleIds).toEqual([]);
+    expect(archivedCatalog.redirects).toEqual([]);
   });
 });
 
@@ -536,10 +579,31 @@ function makeImportSnapshot(
       learningPaths: [{ pathId: 'systems', moduleId: 'persistence' }],
       prerequisites: [],
       related: [],
-      legacyUrls: ['/legacy/imported.html'],
+      legacyUrls: [`/season-10-distributed-systems/${sourceId}.html`],
     },
     warnings: [],
     errors: [],
+  };
+  const pathRecord = {
+    id: 'systems',
+    title: 'Systems',
+    description: 'Systems engineering path.',
+    status: 'published',
+    sourcePath: 'content/paths/systems.yaml',
+    sourceMetadata: { title: 'Systems' },
+    legacyIndexUrls: [],
+    modules: [
+      {
+        id: 'persistence',
+        title: 'Persistence',
+        order: 1,
+        domain: 'systems',
+        category: 'engineering',
+        articleIds: [sourceId],
+        legacyIndexUrls: [],
+        sourceMetadata: { title: 'Persistence' },
+      },
+    ],
   };
   return {
     repository: 'tiecont/stack-atlas',
@@ -552,7 +616,50 @@ function makeImportSnapshot(
       },
     ],
     articles: [article],
-    pathRecords: [],
+    pathRecords: [pathRecord],
+    catalog: {
+      schema_version: 1,
+      site: { name: 'Stack Atlas', description: 'Engineering knowledge.', language: 'vi' },
+      topics: [{ id: 'systems', title: 'Systems', description: 'Systems engineering.' }],
+      categories: [{ id: 'engineering', title: 'Engineering' }],
+      paths: [{
+        id: pathRecord.id,
+        title: pathRecord.title,
+        description: pathRecord.description,
+        status: pathRecord.status,
+        legacyIndexUrls: [],
+        modules: pathRecord.modules.map((module) => ({
+          id: module.id,
+          title: module.title,
+          order: module.order,
+          domain: module.domain,
+          category: module.category,
+          articleIds: module.articleIds,
+          legacyIndexUrls: module.legacyIndexUrls,
+        })),
+      }],
+      articles: [{
+        sourceId,
+        contentKey,
+        domain: 'systems',
+        category: 'engineering',
+        tags: ['transactional'],
+        difficulty: 'unspecified',
+        learningPaths: [{ pathId: 'systems', moduleId: 'persistence' }],
+        prerequisites: [],
+        related: [],
+        labs: [],
+        authors: ['tiecont'],
+        kubernetes: null,
+        review: null,
+        legacyUrls: [`/season-10-distributed-systems/${sourceId}.html`],
+      }],
+      redirects: [{
+        source: `/season-10-distributed-systems/${sourceId}.html`,
+        destination: `/${slug}/`,
+        kind: 'article',
+      }],
+    },
     sourceErrors: [],
   };
 }

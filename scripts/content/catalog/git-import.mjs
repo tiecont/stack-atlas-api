@@ -95,6 +95,10 @@ export function formatMarkdownReport(report, generatedAt) {
     '| ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
     `| ${report.summary.discovered} | ${report.summary.importable} | ${report.summary.imported} | ${report.summary.skipped} | ${report.summary.failed} | ${report.summary.unsupportedConstructs} | ${report.summary.relationshipMismatches} |`,
     '',
+    `Catalog snapshot: ${report.catalogSnapshot.status}`,
+    `Catalog checksum: sha256:${report.catalogSnapshot.checksumSha256}`,
+    ...(report.catalogSnapshot.message ? [`Catalog status: ${report.catalogSnapshot.message}`] : []),
+    '',
     `Inventory files: ${report.source.inventory.length}`,
     '',
     '## Failures',
@@ -173,11 +177,13 @@ async function run(arguments_) {
     path.resolve('content-import-reports', snapshot.commitSha);
   const reportPaths = await writeGitContentImportReport(report, reportDir);
   console.log(
-    `${report.mode}: discovered=${report.summary.discovered}, importable=${report.summary.importable}, imported=${report.summary.imported}, skipped=${report.summary.skipped}, failed=${report.summary.failed}, unsupported=${report.summary.unsupportedConstructs}, relationship_gaps=${report.summary.relationshipMismatches}`,
+    `${report.mode}: discovered=${report.summary.discovered}, importable=${report.summary.importable}, imported=${report.summary.imported}, skipped=${report.summary.skipped}, failed=${report.summary.failed}, unsupported=${report.summary.unsupportedConstructs}, relationship_gaps=${report.summary.relationshipMismatches}, catalog=${report.catalogSnapshot.status}`,
   );
   console.log(`JSON report: ${reportPaths.jsonPath}`);
   console.log(`Markdown report: ${reportPaths.markdownPath}`);
-  if (report.summary.failed > 0) process.exitCode = 1;
+  if (report.summary.failed > 0 || report.summary.relationshipMismatches > 0) {
+    process.exitCode = 1;
+  }
 }
 
 function usage() {

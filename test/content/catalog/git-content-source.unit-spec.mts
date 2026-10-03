@@ -43,11 +43,42 @@ describe('Git content source parser', () => {
       modules: [
         {
           id: 'foundations',
+          title: 'Foundations',
           order: 1,
+          domain: 'architecture',
+          category: 'architecture',
           articleIds: ['source-article'],
-          sourceMetadata: { legacy_index_urls: ['/engineering/index.html'] },
+          legacyIndexUrls: ['/season-01-fundamentals/index.html'],
+          sourceMetadata: { legacy_index_urls: ['/season-01-fundamentals/index.html'] },
         },
       ],
+    });
+    expect(snapshot.catalog).toMatchObject({
+      schema_version: 1,
+      site: { name: 'Stack Atlas', language: 'vi' },
+      topics: [{ id: 'architecture', title: 'Architecture' }],
+      categories: [{ id: 'architecture', title: 'Architecture' }],
+      paths: [{ id: 'engineering', modules: [{ id: 'foundations' }] }],
+      articles: expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: 'source-article',
+          contentKey: 'article:source-article',
+          domain: 'architecture',
+          related: ['target-article'],
+        }),
+        expect.objectContaining({
+          sourceId: 'target-article',
+          contentKey: 'article:target-article',
+          domain: 'architecture',
+        }),
+      ]),
+      redirects: expect.arrayContaining([
+        expect.objectContaining({
+          source: '/season-01-fundamentals/source.html',
+          destination: '/articles/architecture/source/',
+          kind: 'article',
+        }),
+      ]),
     });
 
     const blocks = source?.document?.blocks ?? [];
@@ -190,21 +221,36 @@ function createSourceCheckout(
   mkdirSync(path.join(root, 'content/paths'), { recursive: true });
   mkdirSync(path.join(root, 'content/domains'), { recursive: true });
   writeFileSync(
+    path.join(root, 'content/site.yaml'),
+    'name: Stack Atlas\ndescription: Engineering knowledge.\nlanguage: vi\nbase_url: ""\nbase_path: ""\n',
+  );
+  writeFileSync(
     path.join(root, 'content/paths/engineering.yaml'),
     [
       'id: engineering',
       'title: Engineering',
+      'description: Learn engineering.',
+      'status: published',
       'modules:',
       '  - id: foundations',
+      '    title: Foundations',
       '    order: 1',
+      '    domain: architecture',
+      '    category: architecture',
       '    article_ids:',
       ...pathArticleIds.map((articleId) => `      - ${articleId}`),
       '    legacy_index_urls:',
-      '      - /engineering/index.html',
+      '      - /season-01-fundamentals/index.html',
     ].join('\n'),
   );
-  writeFileSync(path.join(root, 'content/categories.yaml'), 'categories: []\n');
-  writeFileSync(path.join(root, 'content/domains/architecture.yaml'), 'id: architecture\n');
+  writeFileSync(
+    path.join(root, 'content/categories.yaml'),
+    '- id: architecture\n  title: Architecture\n',
+  );
+  writeFileSync(
+    path.join(root, 'content/domains/architecture.yaml'),
+    'id: architecture\ntitle: Architecture\ndescription: System boundaries.\nstatus: published\n',
+  );
   execFileSync('git', ['-C', root, 'init', '-q', '-b', 'main']);
   execFileSync('git', [
     '-C',
@@ -257,7 +303,7 @@ function writeArticle(
       `related: ${JSON.stringify(related)}`,
       `status: ${status}`,
       `url: /articles/architecture/${folder}/`,
-      'legacy_urls: [/old/article.html]',
+      `legacy_urls: [/season-01-fundamentals/${folder}.html]`,
     ].join('\n'),
   );
   writeFileSync(path.join(directory, 'article.html'), html);
