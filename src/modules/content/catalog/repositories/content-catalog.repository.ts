@@ -12,7 +12,10 @@ import type {
   ContentRevisionRecord,
   ContentRevisionSummary,
   ContentImportState,
+  ContentCatalogImportState,
+  ContentCatalogSnapshotV1,
   PublishedContentRecord,
+  StoredPublicContentCatalog,
   PublishContentRevision,
   TransitionContentStatus,
   ContentStatus,
@@ -25,6 +28,7 @@ import {
   ContentRevisionConflictError,
   ContentRevisionNotFoundError,
   ContentSlugConflictError,
+  ContentCatalogSnapshotConflictError,
 } from '../types/content-catalog.types';
 
 interface ContentRow extends QueryResultRow {
@@ -80,11 +84,179 @@ interface ContentImportStateRow extends QueryResultRow {
   latest_revision_checksum_sha256: string | null;
 }
 
+interface CatalogSnapshotRow extends QueryResultRow {
+  id: string;
+  source_commit_sha: string;
+  checksum_sha256: string;
+  catalog: unknown;
+  created_at: Date;
+}
+
+interface CatalogImportStateRow extends QueryResultRow {
+  source_commit_sha: string;
+  checksum_sha256: string;
+  is_active: boolean;
+}
+
+interface PublishedCatalogContentRow extends QueryResultRow {
+  content_id: string;
+  content_key: string;
+  slug: string;
+  published_revision_id: string;
+  title: string;
+  description: string;
+  published_at: Date;
+}
+
 @Injectable()
 export class ContentCatalogRepository {
   constructor(
     @Inject(DatabaseService) private readonly database: DatabaseService,
   ) {}
+
+  async findGitContentCatalogImportState(
+    sourceCommitSha: string,
+  ): Promise<ContentCatalogImportState | null> {
+    const result = await this.database.query<CatalogImportStateRow>(
+      `SELECT snapshot.source_commit_sha, snapshot.checksum_sha256,
+              (active.snapshot_id = snapshot.id) AS is_active
+       FROM stack_atlas.content_catalog_snapshots AS snapshot
+       LEFT JOIN stack_atlas.content_catalog_active_snapshot AS active
+         ON active.slot = 1
+       WHERE snapshot.source_commit_sha = $1`,
+      [sourceCommitSha],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          sourceCommitSha: row.source_commit_sha,
+          checksumSha256: row.checksum_sha256,
+          isActive: row.is_active,
+        }
+      : null;
+  }
+
+  async storeGitContentCatalogSnapshot(input: {
+    sourceCommitSha: string;
+    checksumSha256: string;
+    catalog: ContentCatalogSnapshotV1;
+    actorAccountId: string;
+  }): Promise<void> {
+    await this.database.transaction(async (client) => {
+      let snapshot = await client.query<CatalogSnapshotRow>(
+        `SELECT id, source_commit_sha, checksum_sha256, catalog, created_at
+         FROM stack_atlas.content_catalog_snapshots
+         WHERE source_commit_sha = $1
+         FOR SHARE`,
+        [input.sourceCommitSha],
+      );
+      let row = snapshot.rows[0];
+      if (row && row.checksum_sha256 !== input.checksumSha256) {
+        throw new ContentCatalogSnapshotConflictError();
+      }
+      if (!row) {
+        const id = randomUUID();
+        const inserted = await client.query<CatalogSnapshotRow>(
+          `INSERT INTO stack_atlas.content_catalog_snapshots
+             (id, source_repository, source_commit_sha, checksum_sha256, catalog, created_by)
+           VALUES ($1, 'tiecont/stack-atlas', $2, $3, $4::jsonb, $5)
+           ON CONFLICT (source_commit_sha) DO NOTHING
+           RETURNING id, source_commit_sha, checksum_sha256, catalog, created_at`,
+          [
+            id,
+            input.sourceCommitSha,
+            input.checksumSha256,
+            JSON.stringify(input.catalog),
+            input.actorAccountId,
+          ],
+        );
+        row = inserted.rows[0];
+        if (!row) {
+          snapshot = await client.query<CatalogSnapshotRow>(
+            `SELECT id, source_commit_sha, checksum_sha256, catalog, created_at
+             FROM stack_atlas.content_catalog_snapshots
+             WHERE source_commit_sha = $1
+             FOR SHARE`,
+            [input.sourceCommitSha],
+          );
+          row = snapshot.rows[0];
+          if (!row || row.checksum_sha256 !== input.checksumSha256) {
+            throw new ContentCatalogSnapshotConflictError();
+          }
+        }
+      }
+
+      if (!row)
+        throw new Error('PostgreSQL did not return the catalog snapshot.');
+      await client.query(
+        `INSERT INTO stack_atlas.content_catalog_active_snapshot (slot, snapshot_id)
+         VALUES (1, $1)
+         ON CONFLICT (slot) DO UPDATE
+         SET snapshot_id = EXCLUDED.snapshot_id, updated_at = now()
+         WHERE stack_atlas.content_catalog_active_snapshot.snapshot_id
+           IS DISTINCT FROM EXCLUDED.snapshot_id`,
+        [row.id],
+      );
+    });
+  }
+
+  async findPublicContentCatalog(): Promise<StoredPublicContentCatalog | null> {
+    return this.database.transaction(async (client) => {
+      await client.query(
+        'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY',
+      );
+      const active = await client.query<CatalogSnapshotRow>(
+        `SELECT snapshot.id, snapshot.source_commit_sha, snapshot.checksum_sha256,
+                snapshot.catalog, snapshot.created_at
+         FROM stack_atlas.content_catalog_active_snapshot AS state
+         JOIN stack_atlas.content_catalog_snapshots AS snapshot
+           ON snapshot.id = state.snapshot_id
+         WHERE state.slot = 1`,
+      );
+      const snapshot = active.rows[0];
+      if (!snapshot) return null;
+      const published = await client.query<PublishedCatalogContentRow>(
+        `SELECT item.id AS content_id, item.content_key, item.slug,
+                revision.id AS published_revision_id,
+                revision.document->>'title' AS title,
+                revision.document->>'description' AS description,
+                publication.published_at
+         FROM jsonb_array_elements($1::jsonb->'articles')
+              WITH ORDINALITY AS source(metadata, position)
+         JOIN stack_atlas.content_items AS item
+           ON item.content_key = source.metadata->>'contentKey'
+          AND item.status = 'PUBLISHED'
+          AND item.archived_at IS NULL
+         JOIN stack_atlas.content_revisions AS revision
+           ON revision.id = item.published_revision_id
+          AND revision.content_item_id = item.id
+         JOIN LATERAL (
+           SELECT published_at
+           FROM stack_atlas.content_publications
+           WHERE content_item_id = item.id AND revision_id = revision.id
+           ORDER BY published_at DESC
+           LIMIT 1
+         ) AS publication ON true
+         ORDER BY source.position`,
+        [JSON.stringify(snapshot.catalog)],
+      );
+      return {
+        sourceCommitSha: snapshot.source_commit_sha,
+        checksumSha256: snapshot.checksum_sha256,
+        createdAt: snapshot.created_at,
+        catalog: snapshot.catalog,
+        publishedArticles: published.rows.map((row) => ({
+          contentId: row.content_id,
+          contentKey: row.content_key,
+          slug: row.slug,
+          publishedRevisionId: row.published_revision_id,
+          title: row.title,
+          description: row.description,
+          publishedAt: row.published_at,
+        })),
+      };
+    });
+  }
 
   async createArticle(
     input: CreateContentArticle,
@@ -250,15 +422,25 @@ export class ContentCatalogRepository {
     );
     const row = result.rows[0];
     if (!row) return null;
-    return {
-      contentId: row.id,
-      contentKey: row.content_key,
-      slug: row.slug,
-      status: row.status,
-      latestRevisionId: row.latest_revision_id,
-      publishedRevisionId: row.published_revision_id,
-      latestRevisionChecksumSha256: row.latest_revision_checksum_sha256,
-    };
+    return mapContentImportState(row);
+  }
+
+  async findImportStateBySlug(
+    slug: string,
+  ): Promise<ContentImportState | null> {
+    const result = await this.database.query<ContentImportStateRow>(
+      `SELECT item.id, item.content_key, item.slug, item.status,
+              item.latest_revision_id, item.published_revision_id,
+              revision.checksum_sha256 AS latest_revision_checksum_sha256
+       FROM stack_atlas.content_items AS item
+       LEFT JOIN stack_atlas.content_revisions AS revision
+         ON revision.id = item.latest_revision_id
+        AND revision.content_item_id = item.id
+       WHERE item.slug = $1 AND item.archived_at IS NULL`,
+      [slug],
+    );
+    const row = result.rows[0];
+    return row ? mapContentImportState(row) : null;
   }
 
   appendRevision(input: CreateContentRevision): Promise<ContentRevisionRecord> {
@@ -808,6 +990,18 @@ function mapLifecycle(item: ContentRow): ContentLifecycleRecord {
     archivedBy: item.archived_by,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
+  };
+}
+
+function mapContentImportState(row: ContentImportStateRow): ContentImportState {
+  return {
+    contentId: row.id,
+    contentKey: row.content_key,
+    slug: row.slug,
+    status: row.status,
+    latestRevisionId: row.latest_revision_id,
+    publishedRevisionId: row.published_revision_id,
+    latestRevisionChecksumSha256: row.latest_revision_checksum_sha256,
   };
 }
 

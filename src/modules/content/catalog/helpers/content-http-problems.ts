@@ -9,6 +9,8 @@ import {
   ContentRevisionNotFoundError,
   ContentSearchValidationError,
   ContentSlugConflictError,
+  ContentCatalogNotReadyError,
+  ContentCatalogSnapshotConflictError,
 } from '../types/content-catalog.types';
 import { ContentDocumentValidationError } from '../types/content-document';
 import { ContentSlugValidationError } from '../types/content-slug';
@@ -39,6 +41,22 @@ function toContentProblem(error: unknown): StructuredProblemException | null {
       404,
       'content_not_found',
       'The requested content item was not found.',
+    );
+  }
+  if (error instanceof ContentCatalogNotReadyError) {
+    return new StructuredProblemException(
+      503,
+      'content_catalog_not_ready',
+      'The public content catalog is not available yet.',
+      true,
+    );
+  }
+  if (error instanceof ContentCatalogSnapshotConflictError) {
+    return new StructuredProblemException(
+      503,
+      'content_catalog_unavailable',
+      'The public content catalog failed integrity validation.',
+      true,
     );
   }
   if (error instanceof ContentRevisionNotFoundError) {

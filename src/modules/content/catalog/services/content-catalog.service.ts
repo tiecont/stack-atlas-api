@@ -11,6 +11,10 @@ import type {
   ContentRevisionSummary,
   PublishedContentRecord,
   ContentImportState,
+  ContentCatalogImportState,
+  ContentCatalogSnapshotV1,
+  PublicContentCatalogRecord,
+  StoredPublicContentCatalog,
   ContentStatus,
 } from '../types/content-catalog.types';
 import {
@@ -20,6 +24,8 @@ import {
   ContentPermissionDeniedError,
   ContentRevisionNotFoundError,
   ContentSearchValidationError,
+  ContentCatalogNotReadyError,
+  ContentCatalogSnapshotConflictError,
 } from '../types/content-catalog.types';
 import {
   validateContentDocument,
@@ -27,6 +33,10 @@ import {
 } from '../types/content-document';
 import { normalizeContentSlug } from '../types/content-slug';
 import { checksumContent } from '../helpers/content-checksum';
+import {
+  ContentCatalogSnapshotValidationError,
+  validateContentCatalogSnapshot,
+} from '../types/content-catalog-snapshot';
 import {
   decodeContentListCursor,
   decodeRevisionCursor,
@@ -39,12 +49,16 @@ type ContentCatalogStore = Pick<
   | 'createArticle'
   | 'createPublishedArticle'
   | 'findImportStateByKey'
+  | 'findImportStateBySlug'
   | 'appendRevision'
   | 'findRevision'
   | 'publishRevision'
   | 'findPublishedByKey'
   | 'findPublishedBySlug'
   | 'searchPublishedContent'
+  | 'findGitContentCatalogImportState'
+  | 'storeGitContentCatalogSnapshot'
+  | 'findPublicContentCatalog'
   | 'findLifecycle'
   | 'transitionStatus'
   | 'listContent'
@@ -106,6 +120,49 @@ export class ContentCatalogService {
   ): Promise<ContentImportState | null> {
     await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
     return this.repository.findImportStateByKey(validateContentKey(contentKey));
+  }
+
+  async findGitImportStateBySlug(
+    slug: unknown,
+    principal: AuthenticatedPrincipal,
+  ): Promise<ContentImportState | null> {
+    await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
+    return this.repository.findImportStateBySlug(normalizeContentSlug(slug));
+  }
+
+  async findGitContentCatalogImportState(
+    sourceCommitSha: string,
+    principal: AuthenticatedPrincipal,
+  ): Promise<ContentCatalogImportState | null> {
+    await this.requirePermission(principal, PLATFORM_PERMISSION.CONTENT_READ);
+    if (!/^[a-f0-9]{40}$/.test(sourceCommitSha)) {
+      throw new TypeError('The source commit SHA is invalid.');
+    }
+    return this.repository.findGitContentCatalogImportState(sourceCommitSha);
+  }
+
+  async storeGitContentCatalogSnapshot(
+    sourceCommitSha: string,
+    value: unknown,
+    principal: AuthenticatedPrincipal,
+  ): Promise<string> {
+    await this.requirePermissions(principal, [
+      PLATFORM_PERMISSION.CONTENT_CREATE,
+      PLATFORM_PERMISSION.CONTENT_UPDATE,
+      PLATFORM_PERMISSION.CONTENT_PUBLISH,
+    ]);
+    if (!/^[a-f0-9]{40}$/.test(sourceCommitSha)) {
+      throw new TypeError('The source commit SHA is invalid.');
+    }
+    const catalog = validateContentCatalogSnapshot(value);
+    const checksumSha256 = checksumContent(catalog);
+    await this.repository.storeGitContentCatalogSnapshot({
+      sourceCommitSha,
+      checksumSha256,
+      catalog,
+      actorAccountId: principal.accountId,
+    });
+    return checksumSha256;
   }
 
   authorizeGitContentImport(
@@ -273,6 +330,99 @@ export class ContentCatalogService {
       normalizedQuery,
       MAX_PUBLIC_SEARCH_RESULTS,
     );
+  }
+
+  async getPublicContentCatalog(): Promise<PublicContentCatalogRecord> {
+    const stored: StoredPublicContentCatalog | null =
+      await this.repository.findPublicContentCatalog();
+    if (!stored) throw new ContentCatalogNotReadyError();
+    let catalog: ContentCatalogSnapshotV1;
+    try {
+      catalog = validateContentCatalogSnapshot(stored.catalog);
+    } catch (error) {
+      if (error instanceof ContentCatalogSnapshotValidationError) {
+        throw new ContentCatalogSnapshotConflictError();
+      }
+      throw error;
+    }
+    if (checksumContent(catalog) !== stored.checksumSha256) {
+      throw new ContentCatalogSnapshotConflictError();
+    }
+    const metadataByKey = new Map(
+      catalog.articles.map((article) => [article.contentKey, article]),
+    );
+    const publishedByKey = new Map(
+      stored.publishedArticles.map((article) => [article.contentKey, article]),
+    );
+    const articles = stored.publishedArticles.flatMap((published) => {
+      const metadata = metadataByKey.get(published.contentKey);
+      if (!metadata) return [];
+      return [
+        {
+          ...metadata,
+          contentId: published.contentId,
+          slug: published.slug,
+          title: published.title,
+          description: published.description,
+          publishedRevisionId: published.publishedRevisionId,
+          publishedAt: published.publishedAt.toISOString(),
+          url: `/${published.slug}/`,
+          prerequisites: metadata.prerequisites.filter((id) =>
+            publishedByKey.has(`article:${id}`),
+          ),
+          related: metadata.related.filter((id) =>
+            publishedByKey.has(`article:${id}`),
+          ),
+        },
+      ];
+    });
+    const publishedSourceIds = new Set(
+      articles.map((article) => article.sourceId),
+    );
+    const paths = catalog.paths.map((learningPath) => ({
+      ...learningPath,
+      modules: learningPath.modules.map((module) => ({
+        ...module,
+        articleIds: module.articleIds.filter((id) =>
+          publishedSourceIds.has(id),
+        ),
+      })),
+    }));
+    const redirects = [
+      ...articles.flatMap((article) =>
+        article.legacyUrls.map((source) => ({
+          source,
+          destination: article.url,
+          kind: 'article' as const,
+        })),
+      ),
+      ...paths.flatMap((learningPath) => [
+        ...learningPath.legacyIndexUrls.map((source) => ({
+          source,
+          destination: `/paths/${learningPath.id}/`,
+          kind: 'path-module' as const,
+        })),
+        ...learningPath.modules.flatMap((module) =>
+          module.legacyIndexUrls.map((source) => ({
+            source,
+            destination: `/paths/${learningPath.id}/#module-${module.id}`,
+            kind: 'path-module' as const,
+          })),
+        ),
+      ]),
+    ];
+    return {
+      schema_version: 1,
+      sourceCommitSha: stored.sourceCommitSha,
+      checksumSha256: stored.checksumSha256,
+      createdAt: stored.createdAt,
+      site: catalog.site,
+      topics: catalog.topics,
+      categories: catalog.categories,
+      paths,
+      articles,
+      redirects,
+    };
   }
 
   async listContent(

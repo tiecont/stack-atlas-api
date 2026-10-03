@@ -101,12 +101,20 @@ store; adoption requires a documented workload and explicit ownership.
 
 ### DATA-002 — Authored-content source
 
-Until an explicit authored-content cutover, Web Git remains canonical for
-article bodies, learning paths, exercise definitions, and assessment
-definitions. The API may establish content identity, immutable revisions,
-publication history, and validation as a persistence foundation. It MUST NOT
-dual-write authored content, expose learner reads, or make PostgreSQL the
-content source before that cutover.
+Web Git remains the canonical authored source for supplemental catalog
+metadata, learning paths, exercise definitions, and assessment definitions
+until their explicit cutover. The API owns persisted Content Document V1,
+immutable revisions, publication history, and published article read/search
+representations. Web may read published articles from those API endpoints
+under the approved API-backed public content rollout; this does not by itself
+make PostgreSQL canonical for supplemental catalog metadata.
+
+The Git importer may store a validated, immutable catalog snapshot from one
+clean Web commit in PostgreSQL as migration evidence and as the contract
+candidate for replacing filesystem catalog reads. It MUST NOT edit Git files,
+rewrite snapshot history, or imply that normal authoring is active in both
+systems. Do not call the snapshot the canonical authored source until the
+catalog consumer cutover has passed source-SHA parity and runtime verification.
 
 The API owns persisted Content Document V1. Its canonical contract is
 `docs/contracts/content-v1.md`: document blocks use the

@@ -37,7 +37,7 @@ const document: ContentDocumentV1 = {
 };
 
 describe('GitContentImportService', () => {
-  it('dry-runs without writes and reports source relationship and conversion gaps', async () => {
+  it('dry-runs without writes and reports conversion warnings while preserving metadata', async () => {
     const catalog = createCatalog();
     const service = new GitContentImportService(catalog);
 
@@ -50,9 +50,10 @@ describe('GitContentImportService', () => {
       skipped: 0,
       failed: 0,
       unsupportedConstructs: 1,
-      relationshipMismatches: 7,
+      relationshipMismatches: 0,
     });
     expect(report.articles[0]?.status).toBe('ready');
+    expect(report.catalogSnapshot.status).toBe('ready');
     expect(catalog.authorizeGitContentImport).toHaveBeenCalledWith(false, principal);
     expect(catalog.createPublishedGitImportArticle).not.toHaveBeenCalled();
   });
@@ -108,6 +109,45 @@ describe('GitContentImportService', () => {
     expect(catalog.createPublishedGitImportArticle).not.toHaveBeenCalled();
   });
 
+  it('blocks all writes when published source articles share a slug', async () => {
+    const catalog = createCatalog();
+    const source = snapshot();
+    source.articles.push({
+      ...article(),
+      sourceId: 'duplicate-article',
+      contentKey: 'article:duplicate-article',
+    });
+    const service = new GitContentImportService(catalog);
+
+    const report = await service.run(source, 'apply', principal);
+
+    expect(report.articles.map((result) => result.status)).toEqual([
+      'failed',
+      'failed',
+    ]);
+    expect(report.articles[0]?.message).toContain('same slug');
+    expect(catalog.createPublishedGitImportArticle).not.toHaveBeenCalled();
+    expect(catalog.storeGitContentCatalogSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('blocks all writes when another active content identity owns a source slug', async () => {
+    const catalog = createCatalog();
+    catalog.findGitImportStateBySlug.mockResolvedValue({
+      ...importedState(),
+      contentKey: 'article:another-owner',
+    });
+    const service = new GitContentImportService(catalog);
+
+    const report = await service.run(snapshot(), 'apply', principal);
+
+    expect(report.articles[0]).toMatchObject({
+      status: 'failed',
+      message: expect.stringContaining('different active content identity'),
+    });
+    expect(catalog.createPublishedGitImportArticle).not.toHaveBeenCalled();
+    expect(catalog.storeGitContentCatalogSnapshot).not.toHaveBeenCalled();
+  });
+
   it('blocks the whole preflight when any identity conflicts', async () => {
     const catalog = createCatalog();
     catalog.findGitImportState.mockResolvedValueOnce({
@@ -145,7 +185,7 @@ describe('GitContentImportService', () => {
     expect(catalog.createPublishedGitImportArticle).not.toHaveBeenCalled();
   });
 
-  it('records dangling source relationship references without discarding them', async () => {
+  it('reports dangling catalog references and blocks apply without discarding metadata', async () => {
     const source = snapshot();
     const importedArticle = source.articles[0];
     const pathModule = source.pathRecords[0]?.modules[0];
@@ -157,6 +197,9 @@ describe('GitContentImportService', () => {
     ];
     importedArticle.relationships.prerequisites = ['missing-article'];
     pathModule.articleIds.push('missing-article');
+    const catalogModule = source.catalog.paths[0]?.modules[0];
+    if (!catalogModule) throw new Error('Expected public catalog path fixture.');
+    catalogModule.articleIds.push('missing-article');
 
     const report = await new GitContentImportService(createCatalog()).run(
       source,
@@ -167,29 +210,30 @@ describe('GitContentImportService', () => {
     expect(report.relationshipMismatches).toContainEqual(
       expect.objectContaining({
         relationship: 'path_membership',
-        sourceValue: expect.objectContaining({
-          unresolvedPath: true,
-          unresolvedModule: false,
-        }),
+        sourceValue: { pathId: 'missing-path', moduleId: 'missing-module' },
       }),
     );
     expect(report.relationshipMismatches).toContainEqual(
       expect.objectContaining({
         relationship: 'prerequisite',
-        sourceValue: {
-          articleIds: ['missing-article'],
-          unresolvedArticleIds: ['missing-article'],
-        },
+        sourceValue: ['missing-article'],
       }),
     );
     expect(report.relationshipMismatches).toContainEqual(
       expect.objectContaining({
         relationship: 'path_membership',
-        sourceValue: expect.objectContaining({
-          unresolvedArticleIds: ['missing-article'],
-        }),
+        sourceValue: expect.objectContaining({ unresolvedArticleIds: ['missing-article'] }),
       }),
     );
+
+    const blockedCatalog = createCatalog();
+    const blocked = await new GitContentImportService(blockedCatalog).run(
+      source,
+      'apply',
+      principal,
+    );
+    expect(blocked.catalogSnapshot.status).toBe('failed');
+    expect(blockedCatalog.storeGitContentCatalogSnapshot).not.toHaveBeenCalled();
   });
 });
 
@@ -197,12 +241,18 @@ function createCatalog() {
   return {
     authorizeGitContentImport: vi.fn().mockResolvedValue(undefined),
     findGitImportState: vi.fn().mockResolvedValue(null),
+    findGitImportStateBySlug: vi.fn().mockResolvedValue(null),
     createPublishedGitImportArticle: vi.fn().mockResolvedValue({}),
+    findGitContentCatalogImportState: vi.fn().mockResolvedValue(null),
+    storeGitContentCatalogSnapshot: vi.fn().mockResolvedValue(undefined),
   } satisfies Pick<
     ContentCatalogService,
     | 'authorizeGitContentImport'
     | 'findGitImportState'
+    | 'findGitImportStateBySlug'
     | 'createPublishedGitImportArticle'
+    | 'findGitContentCatalogImportState'
+    | 'storeGitContentCatalogSnapshot'
   >;
 }
 
@@ -222,7 +272,7 @@ function article(): GitContentSourceArticle {
     sourceChecksumSha256: 'a'.repeat(64),
     relationships: {
       domain: 'architecture',
-      category: 'architecture',
+      category: 'engineering',
       tags: ['systems'],
       authors: ['tiecont'],
       difficulty: 'unspecified',
@@ -232,7 +282,7 @@ function article(): GitContentSourceArticle {
       learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
       prerequisites: [],
       related: [],
-      legacyUrls: ['/old/stable-article.html'],
+      legacyUrls: ['/season-01-fundamentals/stable-article.html'],
     },
     warnings: [
       {
@@ -260,21 +310,65 @@ function snapshot(): GitContentSnapshot {
     pathRecords: [
       {
         id: 'backend',
+        title: 'Backend',
+        description: 'Backend path.',
         sourcePath: 'content/paths/backend.yaml',
         sourceMetadata: { title: 'Backend' },
+        legacyIndexUrls: [],
         modules: [
           {
             id: 'foundations',
+            title: 'Foundations',
             order: 1,
+            domain: 'architecture',
+            category: 'engineering',
             articleIds: ['stable-article'],
+            legacyIndexUrls: ['/season-01-fundamentals/index.html'],
             sourceMetadata: {
-              legacy_index_urls: ['/backend/foundations/index.html'],
+              legacy_index_urls: ['/season-01-fundamentals/index.html'],
             },
           },
         ],
-        legacyIndexUrls: [],
       },
     ],
+    catalog: {
+      schema_version: 1,
+      site: { name: 'Stack Atlas', description: 'Engineering knowledge.', language: 'vi' },
+      topics: [{ id: 'architecture', title: 'Architecture', description: 'System boundaries.' }],
+      categories: [{ id: 'engineering', title: 'Engineering' }],
+      paths: [{
+        id: 'backend',
+        title: 'Backend',
+        description: 'Backend path.',
+        legacyIndexUrls: [],
+        modules: [{
+          id: 'foundations',
+          title: 'Foundations',
+          order: 1,
+          domain: 'architecture',
+          category: 'engineering',
+          articleIds: ['stable-article'],
+          legacyIndexUrls: ['/season-01-fundamentals/index.html'],
+        }],
+      }],
+      articles: [{
+        sourceId: 'stable-article',
+        contentKey: 'article:stable-article',
+        domain: 'architecture',
+        category: 'engineering',
+        tags: ['systems'],
+        difficulty: 'unspecified',
+        learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
+        prerequisites: [],
+        related: [],
+        labs: [],
+        authors: ['tiecont'],
+        kubernetes: null,
+        review: null,
+        legacyUrls: ['/season-01-fundamentals/stable-article.html'],
+      }],
+      redirects: [],
+    },
     sourceErrors: [],
   };
 }

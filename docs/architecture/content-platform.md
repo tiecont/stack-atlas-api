@@ -9,14 +9,24 @@ repository uses PostgreSQL transactions and row locks to append a revision and
 move the latest pointer, publish and move the published pointer, or archive and
 restore an item without deleting its history.
 
-Web Git remains the canonical authored source until a separate cutover. An
-explicit operator CLI imports published articles from a clean Web checkout
-pinned to an exact commit SHA. It records the source inventory and reports
-unsupported HTML and relationship metadata the API cannot persist. Each item,
-revision, lifecycle transition, and publication is created through the catalog
-service in one PostgreSQL transaction. The import does not switch Web runtime
-reads or remove Git content. The admin HTTP API remains the authoring surface;
-public reads return only published content.
+Web Git remains the canonical source for supplemental catalog metadata until
+the catalog cutover is approved and verified. An explicit operator CLI imports
+published articles and a validated metadata snapshot from a clean Web checkout
+pinned to an exact commit SHA. The snapshot preserves site, topic, category,
+path, module, relationship, and legacy redirect metadata. It is immutable and
+records its source SHA and checksum. Article items are written through the
+catalog service; the snapshot becomes active only after article preflight and
+imports succeed. The operation does not switch filesystem runtime reads or
+delete Git content. See
+[`../contracts/public-content-catalog-v1.md`](../contracts/public-content-catalog-v1.md).
+
+`GET /api/v1/content/catalog` serves the active snapshot joined to current
+published article identities and publication metadata. It excludes drafts and
+archived articles, filters unresolved/unpublished article references, and
+returns `503` until an operator activates a snapshot. The route is a migration
+contract; Web must keep filesystem catalog reads until source-SHA parity and
+runtime behavior are verified. Published article reads and search continue to
+return only published content.
 
 V1 is limited to article content. A future content kind needs its own validated
 document contract. The API contract is defined in

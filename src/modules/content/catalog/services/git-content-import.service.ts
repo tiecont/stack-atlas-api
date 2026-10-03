@@ -16,7 +16,10 @@ type ContentImportCatalog = Pick<
   ContentCatalogService,
   | 'authorizeGitContentImport'
   | 'findGitImportState'
+  | 'findGitImportStateBySlug'
   | 'createPublishedGitImportArticle'
+  | 'findGitContentCatalogImportState'
+  | 'storeGitContentCatalogSnapshot'
 >;
 
 interface PlannedArticle {
@@ -38,7 +41,16 @@ export class GitContentImportService {
   ): Promise<GitContentImportReport> {
     const planned: PlannedArticle[] = [];
     const sourceErrors = [...snapshot.sourceErrors];
+    const catalogChecksumSha256 = checksumContent(snapshot.catalog);
+    const catalogSnapshot: GitContentImportReport['catalogSnapshot'] = {
+      status: 'ready',
+      checksumSha256: catalogChecksumSha256,
+    };
     let authorizationFailure: string | undefined;
+    let catalogStateFailure: string | undefined;
+    let catalogState: Awaited<
+      ReturnType<ContentCatalogService['findGitContentCatalogImportState']>
+    > = null;
     try {
       await this.catalog.authorizeGitContentImport(mode === 'apply', principal);
     } catch (error) {
@@ -53,6 +65,33 @@ export class GitContentImportService {
       ),
     ]);
     const relationshipMismatches = relationshipGaps(snapshot);
+    const duplicateSlugs = duplicatePublishedSlugs(snapshot.articles);
+
+    if (!authorizationFailure) {
+      try {
+        catalogState = await this.catalog.findGitContentCatalogImportState(
+          snapshot.commitSha,
+          principal,
+        );
+        if (
+          catalogState &&
+          catalogState.checksumSha256 !== catalogChecksumSha256
+        ) {
+          catalogStateFailure =
+            'The catalog snapshot checksum for this source commit differs from the validated source.';
+        } else if (catalogState?.isActive && mode !== 'verify') {
+          catalogSnapshot.status = 'already_imported';
+        }
+      } catch (error) {
+        catalogStateFailure = safeErrorMessage(error);
+      }
+    } else {
+      catalogStateFailure = authorizationFailure;
+    }
+    if (catalogStateFailure) {
+      catalogSnapshot.status = 'failed';
+      catalogSnapshot.message = catalogStateFailure;
+    }
 
     for (const article of snapshot.articles) {
       if (authorizationFailure) {
@@ -87,7 +126,33 @@ export class GitContentImportService {
         });
         continue;
       }
+      if (article.slug && duplicateSlugs.has(article.slug)) {
+        planned.push({
+          article,
+          result: resultFor(
+            article,
+            'failed',
+            'Multiple published source articles resolve to the same slug.',
+          ),
+        });
+        continue;
+      }
       try {
+        const existingSlug = await this.catalog.findGitImportStateBySlug(
+          article.slug,
+          principal,
+        );
+        if (existingSlug && existingSlug.contentKey !== article.contentKey) {
+          planned.push({
+            article,
+            result: resultFor(
+              article,
+              'failed',
+              'The source slug is already owned by a different active content identity.',
+            ),
+          });
+          continue;
+        }
         const existing = await this.catalog.findGitImportState(
           article.contentKey,
           principal,
@@ -134,10 +199,16 @@ export class GitContentImportService {
     }
 
     if (mode === 'apply') {
-      const hasPreflightFailure = planned.some(
-        ({ result }) => result.status === 'failed',
-      );
+      const hasPreflightFailure =
+        planned.some(({ result }) => result.status === 'failed') ||
+        relationshipMismatches.length > 0 ||
+        Boolean(catalogStateFailure);
       if (hasPreflightFailure) {
+        catalogSnapshot.status = 'failed';
+        catalogSnapshot.message =
+          relationshipMismatches.length > 0
+            ? 'Snapshot preflight found unresolved catalog references.'
+            : 'Snapshot preflight failed; no catalog snapshot was activated.';
         for (const entry of planned) {
           if (entry.result.status === 'ready') {
             entry.result = resultFor(
@@ -149,6 +220,21 @@ export class GitContentImportService {
         }
       } else {
         await this.applyReadyArticles(planned, principal);
+        if (!planned.some(({ result }) => result.status === 'failed')) {
+          if (!catalogState?.isActive) {
+            try {
+              await this.catalog.storeGitContentCatalogSnapshot(
+                snapshot.commitSha,
+                snapshot.catalog,
+                principal,
+              );
+              catalogSnapshot.status = 'imported';
+            } catch (error) {
+              catalogSnapshot.status = 'failed';
+              catalogSnapshot.message = safeErrorMessage(error);
+            }
+          }
+        }
       }
     }
 
@@ -161,6 +247,17 @@ export class GitContentImportService {
             'Content identity is not present in PostgreSQL.',
           );
         }
+      }
+      if (
+        !catalogState ||
+        !catalogState.isActive ||
+        catalogState.checksumSha256 !== catalogChecksumSha256
+      ) {
+        catalogSnapshot.status = 'failed';
+        catalogSnapshot.message =
+          'The active PostgreSQL catalog snapshot does not match this source commit.';
+      } else if (!planned.some(({ result }) => result.status === 'failed')) {
+        catalogSnapshot.status = 'verified';
       }
     }
 
@@ -177,8 +274,9 @@ export class GitContentImportService {
       ).length,
       skipped: articleResults.filter((article) => article.status === 'skipped')
         .length,
-      failed: articleResults.filter((article) => article.status === 'failed')
-        .length,
+      failed:
+        articleResults.filter((article) => article.status === 'failed').length +
+        (catalogSnapshot.status === 'failed' ? 1 : 0),
       unsupportedConstructs: unsupportedConstructs.length,
       relationshipMismatches: relationshipMismatches.length,
     };
@@ -190,6 +288,7 @@ export class GitContentImportService {
       },
       mode,
       summary,
+      catalogSnapshot,
       articles: articleResults,
       unsupportedConstructs,
       relationshipMismatches,
@@ -278,6 +377,19 @@ function isImportableSource(
   );
 }
 
+function duplicatePublishedSlugs(
+  articles: GitContentSourceArticle[],
+): Set<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const article of articles) {
+    if (article.sourceStatus !== 'published' || !article.slug) continue;
+    if (seen.has(article.slug)) duplicates.add(article.slug);
+    else seen.add(article.slug);
+  }
+  return duplicates;
+}
+
 function matchesSource(
   existing: {
     slug: string;
@@ -307,145 +419,83 @@ function relationshipGaps(
       .map((article) => article.sourceId)
       .filter((articleId): articleId is string => articleId !== null),
   );
+  const topicIds = new Set(snapshot.catalog.topics.map((topic) => topic.id));
+  const categoryIds = new Set(
+    snapshot.catalog.categories.map((category) => category.id),
+  );
+  const pathById = new Map(
+    snapshot.catalog.paths.map((path) => [path.id, path]),
+  );
   for (const article of snapshot.articles) {
-    if (
-      article.contentKey &&
-      (article.relationships.domain ||
-        article.relationships.category ||
-        article.relationships.tags.length > 0)
-    ) {
+    const domain = article.relationships.domain;
+    if (article.contentKey && domain && !topicIds.has(domain)) {
       mismatches.push({
         contentKey: article.contentKey,
         relationship: 'topic_metadata',
-        sourceValue: {
-          domain: article.relationships.domain,
-          category: article.relationships.category,
-          tags: article.relationships.tags,
-        },
-        reason:
-          'The current API content model has no taxonomy or topic persistence.',
+        sourceValue: domain,
+        reason: 'Article topic metadata points to a missing topic record.',
       });
     }
-    if (
-      article.contentKey &&
-      (article.relationships.authors.length > 0 ||
-        article.relationships.difficulty ||
-        article.relationships.kubernetes ||
-        article.relationships.review)
-    ) {
+    const category = article.relationships.category;
+    if (article.contentKey && category && !categoryIds.has(category)) {
       mismatches.push({
         contentKey: article.contentKey,
-        relationship: 'article_metadata',
-        sourceValue: {
-          authors: article.relationships.authors,
-          difficulty: article.relationships.difficulty,
-          kubernetes: article.relationships.kubernetes,
-          review: article.relationships.review,
-        },
+        relationship: 'topic_metadata',
+        sourceValue: category,
         reason:
-          'The current API content model has no author, difficulty, platform detail, or review metadata fields.',
-      });
-    }
-    if (article.contentKey && article.relationships.labs.length > 0) {
-      mismatches.push({
-        contentKey: article.contentKey,
-        relationship: 'lab_reference',
-        sourceValue: article.relationships.labs,
-        reason:
-          'The current API content model has no lab relationship persistence.',
+          'Article category metadata points to a missing category record.',
       });
     }
     for (const membership of article.relationships.learningPaths) {
       if (!article.contentKey) continue;
-      const path = snapshot.pathRecords.find(
-        (record) => record.id === membership.pathId,
-      );
-      const moduleExists = path?.modules.some(
+      const learningPath = pathById.get(membership.pathId);
+      const moduleExists = learningPath?.modules.some(
         (module) => module.id === membership.moduleId,
       );
-      mismatches.push({
-        contentKey: article.contentKey,
-        relationship: 'path_membership',
-        sourceValue: {
-          ...membership,
-          unresolvedPath: !path,
-          unresolvedModule: Boolean(path) && !moduleExists,
-        },
-        reason:
-          'The current API content model has no learning path or module ordering persistence.',
-      });
-    }
-    if (article.relationships.prerequisites.length > 0 && article.contentKey) {
-      mismatches.push({
-        contentKey: article.contentKey,
-        relationship: 'prerequisite',
-        sourceValue: {
-          articleIds: article.relationships.prerequisites,
-          unresolvedArticleIds: article.relationships.prerequisites.filter(
-            (prerequisite) => !articleIds.has(prerequisite),
-          ),
-        },
-        reason:
-          'The current API content model has no prerequisite relationship persistence.',
-      });
-    }
-    if (article.relationships.legacyUrls.length > 0 && article.contentKey) {
-      mismatches.push({
-        contentKey: article.contentKey,
-        relationship: 'legacy_redirect',
-        sourceValue: article.relationships.legacyUrls,
-        reason:
-          'The current API content model has no legacy redirect persistence.',
-      });
-    }
-  }
-  for (const path of snapshot.pathRecords) {
-    mismatches.push({
-      contentKey: `path:${path.id}`,
-      relationship: 'path_metadata',
-      sourceValue: path.sourceMetadata,
-      reason:
-        'The current API content model has no learning path metadata persistence.',
-    });
-    for (const module of path.modules) {
-      mismatches.push({
-        contentKey: `path:${path.id}`,
-        relationship: 'path_membership',
-        sourceValue: {
-          ...module.sourceMetadata,
-          unresolvedArticleIds: module.articleIds.filter(
-            (articleId) => !articleIds.has(articleId),
-          ),
-        },
-        reason:
-          'The current API content model has no learning path/module identity or ordering persistence.',
-      });
-      const moduleLegacyUrls = module.sourceMetadata['legacy_index_urls'];
-      if (
-        Array.isArray(moduleLegacyUrls) &&
-        moduleLegacyUrls.length > 0 &&
-        moduleLegacyUrls.every((url) => typeof url === 'string')
-      ) {
+      if (!moduleExists) {
         mismatches.push({
-          contentKey: `path:${path.id}`,
-          relationship: 'legacy_redirect',
-          sourceValue: {
-            moduleId: module.id,
-            urls: moduleLegacyUrls,
-          },
-          reason:
-            'The current API content model has no module redirect persistence.',
+          contentKey: article.contentKey,
+          relationship: 'path_membership',
+          sourceValue: membership,
+          reason: 'Article membership points to a missing path or module.',
         });
       }
     }
-    if (path.legacyIndexUrls.length > 0) {
+    const unresolvedArticleIds = [
+      ...article.relationships.prerequisites,
+      ...article.relationships.related,
+    ].filter((reference) => !articleIds.has(reference));
+    if (unresolvedArticleIds.length > 0 && article.contentKey) {
       mismatches.push({
-        contentKey: `path:${path.id}`,
-        relationship: 'legacy_redirect',
-        sourceValue: path.legacyIndexUrls,
+        contentKey: article.contentKey,
+        relationship: 'prerequisite',
+        sourceValue: unresolvedArticleIds,
         reason:
-          'The current API content model has no path redirect persistence.',
+          'Article prerequisite or related-content metadata points to a missing article.',
       });
+    }
+  }
+  for (const learningPath of snapshot.catalog.paths) {
+    for (const module of learningPath.modules) {
+      const unknownTopic = !topicIds.has(module.domain);
+      const unknownCategory = !categoryIds.has(module.category);
+      const unresolvedArticleIds = module.articleIds.filter(
+        (articleId) => !articleIds.has(articleId),
+      );
+      if (unknownTopic || unknownCategory || unresolvedArticleIds.length > 0) {
+        mismatches.push({
+          contentKey: `path:${learningPath.id}`,
+          relationship: 'path_membership',
+          sourceValue: {
+            moduleId: module.id,
+            unknownTopic: unknownTopic ? module.domain : null,
+            unknownCategory: unknownCategory ? module.category : null,
+            unresolvedArticleIds,
+          },
+          reason:
+            'Path module metadata references a missing topic, category, or article.',
+        });
+      }
     }
   }
   return mismatches;

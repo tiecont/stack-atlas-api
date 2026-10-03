@@ -15,12 +15,18 @@ describe('GitContentImportService', () => {
     const catalog = {
       authorizeGitContentImport: vi.fn().mockResolvedValue(undefined),
       findGitImportState: vi.fn(),
+      findGitImportStateBySlug: vi.fn().mockResolvedValue(null),
       createPublishedGitImportArticle: vi.fn(),
+      findGitContentCatalogImportState: vi.fn().mockResolvedValue(null),
+      storeGitContentCatalogSnapshot: vi.fn().mockResolvedValue(undefined),
     } satisfies Pick<
       ContentCatalogService,
       | 'authorizeGitContentImport'
       | 'findGitImportState'
+      | 'findGitImportStateBySlug'
       | 'createPublishedGitImportArticle'
+      | 'findGitContentCatalogImportState'
+      | 'storeGitContentCatalogSnapshot'
     >;
     const service = new GitContentImportService(catalog);
     const snapshot: GitContentSnapshot = {
@@ -64,6 +70,19 @@ describe('GitContentImportService', () => {
         },
       ],
       pathRecords: [],
+      catalog: {
+        schema_version: 1,
+        site: {
+          name: 'Stack Atlas',
+          description: 'Engineering knowledge.',
+          language: 'vi',
+        },
+        topics: [],
+        categories: [],
+        paths: [],
+        articles: [],
+        redirects: [],
+      },
       sourceErrors: [],
     };
 

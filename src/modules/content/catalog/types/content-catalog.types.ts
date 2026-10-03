@@ -47,6 +47,127 @@ export interface PublishedContentRecord extends ContentRevisionRecord {
   publishedBy: string | null;
 }
 
+export interface ContentCatalogSiteV1 {
+  name: string;
+  description: string;
+  language: string;
+}
+
+export interface ContentCatalogTopicV1 {
+  id: string;
+  title: string;
+  description: string;
+  status?: string;
+  icon?: string;
+}
+
+export interface ContentCatalogCategoryV1 {
+  id: string;
+  title: string;
+}
+
+export interface ContentCatalogPathModuleV1 {
+  id: string;
+  title: string;
+  order: number;
+  domain: string;
+  category: string;
+  group?: string;
+  articleIds: string[];
+  legacyIndexUrls: string[];
+}
+
+export interface ContentCatalogPathV1 {
+  id: string;
+  title: string;
+  description: string;
+  status?: string;
+  domain?: string;
+  difficulty?: { start: string; end: string };
+  legacyIndexUrls: string[];
+  modules: ContentCatalogPathModuleV1[];
+}
+
+export interface ContentCatalogArticleMetadataV1 {
+  sourceId: string;
+  contentKey: string;
+  domain: string;
+  category: string | null;
+  tags: string[];
+  difficulty: string;
+  learningPaths: { pathId: string; moduleId: string }[];
+  prerequisites: string[];
+  related: string[];
+  labs: string[];
+  authors: string[];
+  kubernetes: Record<string, unknown> | null;
+  review: Record<string, unknown> | null;
+  legacyUrls: string[];
+}
+
+export interface ContentCatalogRedirectV1 {
+  source: string;
+  destination: string;
+  kind: 'article' | 'path-module';
+}
+
+export interface ContentCatalogSnapshotV1 {
+  schema_version: 1;
+  site: ContentCatalogSiteV1;
+  topics: ContentCatalogTopicV1[];
+  categories: ContentCatalogCategoryV1[];
+  paths: ContentCatalogPathV1[];
+  articles: ContentCatalogArticleMetadataV1[];
+  redirects: ContentCatalogRedirectV1[];
+}
+
+export interface PublishedCatalogArticleV1 extends ContentCatalogArticleMetadataV1 {
+  contentId: string;
+  slug: string;
+  title: string;
+  description: string;
+  publishedRevisionId: string;
+  publishedAt: string;
+  url: string;
+}
+
+export interface PublicContentCatalogRecord {
+  schema_version: 1;
+  sourceCommitSha: string;
+  checksumSha256: string;
+  createdAt: Date;
+  site: ContentCatalogSiteV1;
+  topics: ContentCatalogTopicV1[];
+  categories: ContentCatalogCategoryV1[];
+  paths: ContentCatalogPathV1[];
+  articles: PublishedCatalogArticleV1[];
+  redirects: ContentCatalogRedirectV1[];
+}
+
+export interface ContentCatalogImportState {
+  sourceCommitSha: string;
+  checksumSha256: string;
+  isActive: boolean;
+}
+
+export interface PublishedCatalogContentState {
+  contentId: string;
+  contentKey: string;
+  slug: string;
+  publishedRevisionId: string;
+  title: string;
+  description: string;
+  publishedAt: Date;
+}
+
+export interface StoredPublicContentCatalog {
+  sourceCommitSha: string;
+  checksumSha256: string;
+  createdAt: Date;
+  catalog: unknown;
+  publishedArticles: PublishedCatalogContentState[];
+}
+
 export interface ContentRevisionSummary {
   contentId: string;
   revisionId: string;
@@ -142,6 +263,20 @@ export class ContentSearchValidationError extends Error {
       'The public content search query must be a string no longer than 160 characters.',
     );
     this.name = 'ContentSearchValidationError';
+  }
+}
+
+export class ContentCatalogNotReadyError extends Error {
+  constructor() {
+    super('The public content catalog has not been imported.');
+    this.name = 'ContentCatalogNotReadyError';
+  }
+}
+
+export class ContentCatalogSnapshotConflictError extends Error {
+  constructor() {
+    super('The catalog snapshot for this source commit does not match.');
+    this.name = 'ContentCatalogSnapshotConflictError';
   }
 }
 

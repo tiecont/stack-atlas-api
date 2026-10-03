@@ -1,4 +1,9 @@
 import type { ContentDocumentV1 } from './content-document';
+import type {
+  ContentCatalogPathModuleV1,
+  ContentCatalogPathV1,
+  ContentCatalogSnapshotV1,
+} from './content-catalog.types';
 
 export type GitContentImportMode = 'dry-run' | 'apply' | 'verify';
 
@@ -13,19 +18,17 @@ export interface GitContentInventoryFile {
   sha256: string;
 }
 
-export interface GitContentPathModule {
-  id: string;
-  order: number;
-  articleIds: string[];
+export interface GitContentPathModule extends ContentCatalogPathModuleV1 {
   sourceMetadata: Record<string, unknown>;
 }
 
-export interface GitContentPathRecord {
-  id: string;
+export interface GitContentPathRecord extends Omit<
+  ContentCatalogPathV1,
+  'modules'
+> {
   sourcePath: string;
   sourceMetadata: Record<string, unknown>;
   modules: GitContentPathModule[];
-  legacyIndexUrls: string[];
 }
 
 export interface GitContentRelationships {
@@ -65,6 +68,7 @@ export interface GitContentSnapshot {
   inventory: GitContentInventoryFile[];
   articles: GitContentSourceArticle[];
   pathRecords: GitContentPathRecord[];
+  catalog: ContentCatalogSnapshotV1;
   sourceErrors: GitContentImportIssue[];
 }
 
@@ -111,6 +115,11 @@ export interface GitContentImportReport {
     failed: number;
     unsupportedConstructs: number;
     relationshipMismatches: number;
+  };
+  catalogSnapshot: {
+    status: 'ready' | 'already_imported' | 'imported' | 'verified' | 'failed';
+    checksumSha256: string;
+    message?: string;
   };
   articles: GitContentImportArticleResult[];
   unsupportedConstructs: GitContentImportIssue[];

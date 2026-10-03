@@ -8,9 +8,12 @@ import {
   ContentLifecycleTransitionError,
   ContentPermissionDeniedError,
   ContentSearchValidationError,
+  ContentCatalogSnapshotConflictError,
 } from '../types/content-catalog.types';
 import { ContentDocumentValidationError } from '../types/content-document';
 import type { AuthenticatedPrincipal } from '../../../identity/authentication/types/authenticated-principal';
+import { checksumContent } from '../helpers/content-checksum';
+import { ContentCatalogNotReadyError } from '../types/content-catalog.types';
 
 const principal: AuthenticatedPrincipal = {
   accountId: '20000000-0000-4000-8000-000000000001',
@@ -49,12 +52,16 @@ function createRepository() {
     createArticle: vi.fn(),
     createPublishedArticle: vi.fn(),
     findImportStateByKey: vi.fn(),
+    findImportStateBySlug: vi.fn(),
     appendRevision: vi.fn(),
     findRevision: vi.fn(),
     publishRevision: vi.fn(),
     findPublishedByKey: vi.fn(),
     findPublishedBySlug: vi.fn(),
     searchPublishedContent: vi.fn(),
+    findGitContentCatalogImportState: vi.fn(),
+    storeGitContentCatalogSnapshot: vi.fn(),
+    findPublicContentCatalog: vi.fn(),
     findLifecycle: vi.fn(),
     transitionStatus: vi.fn(),
     listContent: vi.fn(),
@@ -64,12 +71,16 @@ function createRepository() {
     | 'createArticle'
     | 'createPublishedArticle'
     | 'findImportStateByKey'
+    | 'findImportStateBySlug'
     | 'appendRevision'
     | 'findRevision'
     | 'publishRevision'
     | 'findPublishedByKey'
     | 'findPublishedBySlug'
     | 'searchPublishedContent'
+    | 'findGitContentCatalogImportState'
+    | 'storeGitContentCatalogSnapshot'
+    | 'findPublicContentCatalog'
     | 'findLifecycle'
     | 'transitionStatus'
     | 'listContent'
@@ -174,6 +185,22 @@ describe('ContentCatalogService', () => {
     });
   });
 
+  it('looks up normalized Git import slugs under content:read permission', async () => {
+    const repository = createRepository();
+    repository.findImportStateBySlug.mockResolvedValue(null);
+    const authorization = createAuthorization();
+    const service = new ContentCatalogService(repository, authorization);
+
+    await service.findGitImportStateBySlug(' Articles/Stable ', principal);
+
+    expect(authorization.hasPermissions).toHaveBeenCalledWith(principal, [
+      PLATFORM_PERMISSION.CONTENT_READ,
+    ]);
+    expect(repository.findImportStateBySlug).toHaveBeenCalledWith(
+      'articles/stable',
+    );
+  });
+
   it('searches published content with a bounded query and result count', async () => {
     const repository = createRepository();
     repository.searchPublishedContent.mockResolvedValue([]);
@@ -206,6 +233,157 @@ describe('ContentCatalogService', () => {
       service.searchPublishedContent('x'.repeat(161)),
     ).rejects.toBeInstanceOf(ContentSearchValidationError);
     expect(repository.searchPublishedContent).not.toHaveBeenCalled();
+  });
+
+  it('builds the public catalog from the active snapshot and current published state', async () => {
+    const catalogSnapshot = {
+      schema_version: 1,
+      site: {
+        name: 'Stack Atlas',
+        description: 'Engineering knowledge.',
+        language: 'vi',
+      },
+      topics: [
+        {
+          id: 'architecture',
+          title: 'Architecture',
+          description: 'System boundaries.',
+        },
+      ],
+      categories: [{ id: 'engineering', title: 'Engineering' }],
+      paths: [
+        {
+          id: 'backend',
+          title: 'Backend',
+          description: 'Backend learning path.',
+          legacyIndexUrls: [],
+          modules: [
+            {
+              id: 'foundations',
+              title: 'Foundations',
+              order: 1,
+              domain: 'architecture',
+              category: 'engineering',
+              articleIds: ['alpha', 'beta'],
+              legacyIndexUrls: ['/season-01-fundamentals/index.html'],
+            },
+          ],
+        },
+      ],
+      articles: [
+        {
+          sourceId: 'alpha',
+          contentKey: 'article:alpha',
+          domain: 'architecture',
+          category: 'engineering',
+          tags: [],
+          difficulty: 'unspecified',
+          learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
+          prerequisites: [],
+          related: ['beta'],
+          labs: [],
+          authors: [],
+          kubernetes: null,
+          review: null,
+          legacyUrls: ['/season-01-fundamentals/alpha.html'],
+        },
+        {
+          sourceId: 'beta',
+          contentKey: 'article:beta',
+          domain: 'architecture',
+          category: 'engineering',
+          tags: [],
+          difficulty: 'unspecified',
+          learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
+          prerequisites: [],
+          related: [],
+          labs: [],
+          authors: [],
+          kubernetes: null,
+          review: null,
+          legacyUrls: [],
+        },
+      ],
+      redirects: [],
+    } as const;
+    const repository = createRepository();
+    repository.findPublicContentCatalog.mockResolvedValue({
+      sourceCommitSha: 'a'.repeat(40),
+      checksumSha256: checksumContent(catalogSnapshot),
+      createdAt: new Date('2026-10-03T00:00:00.000Z'),
+      catalog: catalogSnapshot,
+      publishedArticles: [
+        {
+          contentId: 'content-alpha',
+          contentKey: 'article:alpha',
+          slug: 'articles/architecture/alpha',
+          publishedRevisionId: 'revision-alpha',
+          title: 'Alpha from published revision',
+          description: 'Published description.',
+          publishedAt: new Date('2026-10-02T00:00:00.000Z'),
+        },
+      ],
+    });
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    const result = await service.getPublicContentCatalog();
+
+    expect(result.articles).toHaveLength(1);
+    expect(result.articles[0]).toMatchObject({
+      sourceId: 'alpha',
+      title: 'Alpha from published revision',
+      url: '/articles/architecture/alpha/',
+      related: [],
+    });
+    expect(result.paths[0]?.modules[0]?.articleIds).toEqual(['alpha']);
+    expect(result.redirects).toContainEqual({
+      source: '/season-01-fundamentals/alpha.html',
+      destination: '/articles/architecture/alpha/',
+      kind: 'article',
+    });
+  });
+
+  it('reports catalog service unavailability before the first verified import', async () => {
+    const repository = createRepository();
+    repository.findPublicContentCatalog.mockResolvedValue(null);
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(service.getPublicContentCatalog()).rejects.toBeInstanceOf(
+      ContentCatalogNotReadyError,
+    );
+  });
+
+  it('rejects an active catalog snapshot whose checksum does not match its content', async () => {
+    const repository = createRepository();
+    repository.findPublicContentCatalog.mockResolvedValue({
+      sourceCommitSha: 'a'.repeat(40),
+      checksumSha256: '0'.repeat(64),
+      createdAt: new Date('2026-10-03T00:00:00.000Z'),
+      catalog: {
+        schema_version: 1,
+        site: { name: 'Stack Atlas', description: 'Catalog.', language: 'vi' },
+        topics: [],
+        categories: [],
+        paths: [],
+        articles: [],
+        redirects: [],
+      },
+      publishedArticles: [],
+    });
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(service.getPublicContentCatalog()).rejects.toBeInstanceOf(
+      ContentCatalogSnapshotConflictError,
+    );
   });
 
   it('applies the explicit transition matrix and rejects transitions from the wrong state', async () => {

@@ -79,6 +79,11 @@ describe('PostgreSQL migrations', () => {
             'content/catalog/migrations/1790754919880-AddContentListIndex.ts',
           migration_kind: 'schema',
         },
+        {
+          migration_name:
+            'content/catalog/migrations/1790964762558-AddPublicContentCatalog.ts',
+          migration_kind: 'schema',
+        },
       ]),
     );
     const publicationActor = await pool!.query<{
@@ -109,13 +114,15 @@ describe('PostgreSQL migrations', () => {
          AND table_name IN (
            'users', 'sessions', 'content_items', 'content_revisions',
            'content_publications', 'platform_roles',
-           'platform_role_permissions', 'user_platform_roles'
+           'platform_role_permissions', 'user_platform_roles',
+           'content_catalog_snapshots', 'content_catalog_active_snapshot'
          )`,
     );
-    expect(ownedTables.rows[0]?.count).toBe(8);
+    expect(ownedTables.rows[0]?.count).toBe(10);
   });
 
   it('preserves published state when upgrading a legacy item with a publication pointer', async () => {
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
@@ -175,6 +182,7 @@ describe('PostgreSQL migrations', () => {
     });
     await runMigrations('down');
     await runMigrations('down');
+    await runMigrations('down');
     await expect(runMigrations('down')).rejects.toThrow(
       'Refusing to roll back content lifecycle metadata while content items exist',
     );
@@ -217,6 +225,7 @@ describe('PostgreSQL migrations', () => {
     );
 
     await runMigrations('down');
+    await runMigrations('down');
     await expect(runMigrations('down')).rejects.toThrow(
       'Refusing to remove recorded publication actor attribution',
     );
@@ -235,6 +244,7 @@ describe('PostgreSQL migrations', () => {
   });
 
   it('normalizes upgrade rows and refuses normalization collisions without data loss', async () => {
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
@@ -406,6 +416,7 @@ describe('PostgreSQL migrations', () => {
     await pool!.query(
       'CREATE TABLE stack_atlas.migration_safety_probe (id integer)',
     );
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
