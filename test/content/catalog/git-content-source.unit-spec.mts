@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseGitContentSnapshot } from '../../../src/modules/content/catalog/helpers/git-content-source.js';
+import { isCanonicalArticleSlug } from '../../../src/modules/content/catalog/types/content-slug.js';
 
 const temporaryRoots: string[] = [];
 
@@ -33,6 +34,7 @@ describe('Git content source parser', () => {
     );
     expect(source?.contentKey).toBe('article:source-article');
     expect(source?.slug).toBe('articles/architecture/source');
+    expect(isCanonicalArticleSlug(source?.slug)).toBe(true);
     expect(source?.errors).toEqual([]);
     expect(source?.relationships.learningPaths).toEqual([
       { pathId: 'engineering', moduleId: 'foundations' },
@@ -150,6 +152,24 @@ describe('Git content source parser', () => {
     expect(source?.errors.map((error) => error.code)).toContain('unsafe_link_url');
   });
 
+  it('rejects a Git article URL that cannot resolve to a canonical article route', async () => {
+    const root = createSourceCheckout(
+      undefined,
+      'published',
+      ['source-article'],
+      '/articles/architecture/',
+    );
+    const snapshot = await parseGitContentSnapshot(root);
+    const source = snapshot.articles.find(
+      (article) => article.sourceId === 'source-article',
+    );
+
+    expect(source?.slug).toBeNull();
+    expect(source?.errors.map((error) => error.code)).toContain(
+      'invalid_article_url',
+    );
+  });
+
   it('rejects unrecognized statuses and executable attributes inside containers', async () => {
     const root = createSourceCheckout(
       '<div class="callout"><span onclick="run()">Unsafe source</span></div>',
@@ -206,6 +226,7 @@ function createSourceCheckout(
   sourceHtml?: string,
   sourceStatus = 'published',
   pathArticleIds = ['source-article'],
+  sourceUrl?: string,
 ): string {
   const root = mkdtempSync(path.join(tmpdir(), 'stack-atlas-source-'));
   temporaryRoots.push(root);
@@ -216,6 +237,7 @@ function createSourceCheckout(
     sourceHtml ?? supportedHtml(),
     ['target-article'],
     sourceStatus,
+    sourceUrl,
   );
   writeArticle(root, 'target', 'target-article', '<p>Target text.</p>');
   mkdirSync(path.join(root, 'content/paths'), { recursive: true });
@@ -283,6 +305,7 @@ function writeArticle(
   html: string,
   related: string[] = [],
   status = 'published',
+  articleUrl?: string,
 ): void {
   const directory = path.join(root, 'content/articles/architecture', folder);
   mkdirSync(directory, { recursive: true });
@@ -302,7 +325,7 @@ function writeArticle(
       'prerequisites: []',
       `related: ${JSON.stringify(related)}`,
       `status: ${status}`,
-      `url: /articles/architecture/${folder}/`,
+      `url: ${articleUrl ?? ('/articles/architecture/' + folder + '/')}`,
       `legacy_urls: [/season-01-fundamentals/${folder}.html]`,
     ].join('\n'),
   );

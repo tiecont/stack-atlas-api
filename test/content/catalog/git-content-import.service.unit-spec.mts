@@ -96,7 +96,7 @@ describe('GitContentImportService', () => {
     const catalog = createCatalog();
     catalog.findGitImportState.mockResolvedValue({
       ...importedState(),
-      slug: 'articles/another-route',
+      slug: 'articles/architecture/another-route',
     });
     const service = new GitContentImportService(catalog);
 
@@ -130,6 +130,34 @@ describe('GitContentImportService', () => {
     expect(catalog.storeGitContentCatalogSnapshot).not.toHaveBeenCalled();
   });
 
+  it('fails dry-run and apply for a non-canonical source route', async () => {
+    for (const mode of ['dry-run', 'apply'] as const) {
+      const catalog = createCatalog();
+      const source = snapshot();
+      const importedArticle = source.articles[0];
+      if (!importedArticle) throw new Error('Expected a Git article fixture.');
+      importedArticle.slug = 'engineering/new-guide';
+
+      const report = await new GitContentImportService(catalog).run(
+        source,
+        mode,
+        principal,
+      );
+
+      expect(report.articles[0]).toMatchObject({
+        status: 'failed',
+        message: 'The article route must match articles/<domain>/<slug>.',
+      });
+      expect(report.summary.failed).toBe(mode === 'apply' ? 2 : 1);
+      expect(catalog.findGitImportStateBySlug).not.toHaveBeenCalled();
+      expect(catalog.createPublishedGitImportArticle).not.toHaveBeenCalled();
+      expect(catalog.storeGitContentCatalogSnapshot).not.toHaveBeenCalled();
+      if (mode === 'apply') {
+        expect(report.catalogSnapshot.status).toBe('failed');
+      }
+    }
+  });
+
   it('blocks all writes when another active content identity owns a source slug', async () => {
     const catalog = createCatalog();
     catalog.findGitImportStateBySlug.mockResolvedValue({
@@ -152,7 +180,7 @@ describe('GitContentImportService', () => {
     const catalog = createCatalog();
     catalog.findGitImportState.mockResolvedValueOnce({
       ...importedState(),
-      slug: 'articles/different',
+      slug: 'articles/architecture/different',
     });
     const source = snapshot();
     source.articles.push({

@@ -100,7 +100,12 @@ export class AdminContentController {
     summary: 'Create a content item and its first draft revision',
   })
   @ApiCreatedResponse({ type: ContentRevisionResponseDto })
-  @ApiResponse(problemDetailsResponse(400, 'Invalid content request'))
+  @ApiResponse(
+    problemDetailsResponse(
+      400,
+      'Invalid article route (code: invalid_content_route; retryable: false; message: The article route must match articles/<domain>/<slug>.) or invalid content request',
+    ),
+  )
   @ApiResponse(problemDetailsResponse(401, 'A valid session is required'))
   @ApiResponse(problemDetailsResponse(403, 'The session lacks content:create'))
   @ApiResponse(problemDetailsResponse(409, 'Content identity or slug conflict'))
@@ -244,7 +249,12 @@ export class AdminContentController {
   @ApiResponse(
     problemDetailsResponse(404, 'Content item or revision not found'),
   )
-  @ApiResponse(problemDetailsResponse(409, 'Invalid or stale lifecycle state'))
+  @ApiResponse(
+    problemDetailsResponse(
+      409,
+      'Invalid lifecycle state (code: content_lifecycle_transition_conflict) or non-canonical public article route (code: content_route_not_publishable; retryable: false; message: The content item does not have a canonical public article route.)',
+    ),
+  )
   publish(
     @Param('id', new ParseUUIDPipe()) contentId: string,
     @Body() input: PublishContentRevisionDto,

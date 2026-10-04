@@ -19,6 +19,7 @@ import type {
   PublishContentRevision,
   TransitionContentStatus,
   ContentStatus,
+  ContentArticleRouteAuditRow,
 } from '../types/content-catalog.types';
 import {
   ContentIdentityConflictError,
@@ -72,6 +73,16 @@ interface ContentRevisionSummaryRow extends QueryResultRow {
   created_at: Date;
   published_at: Date | null;
   published_by: string | null;
+}
+
+interface ArticleRoutePreflightRow extends QueryResultRow {
+  id: string;
+  content_key: string;
+  content_type: 'article';
+  slug: string;
+  status: ContentStatus;
+  archived_at: Date | null;
+  published_revision_id: string | null;
 }
 
 interface ContentImportStateRow extends QueryResultRow {
@@ -225,6 +236,7 @@ export class ContentCatalogRepository {
               WITH ORDINALITY AS source(metadata, position)
          JOIN stack_atlas.content_items AS item
            ON item.content_key = source.metadata->>'contentKey'
+          AND item.content_type = 'article'
           AND item.status = 'PUBLISHED'
           AND item.archived_at IS NULL
          JOIN stack_atlas.content_revisions AS revision
@@ -580,6 +592,26 @@ export class ContentCatalogRepository {
     };
   }
 
+  async listArticleRoutePreflightRows(): Promise<
+    ContentArticleRouteAuditRow[]
+  > {
+    return this.database.transaction(async (client) => {
+      await client.query('SET TRANSACTION READ ONLY');
+      const result = await client.query<ArticleRoutePreflightRow>(
+        "SELECT id, content_key, content_type, slug, status, archived_at, published_revision_id FROM stack_atlas.content_items WHERE content_type = 'article' ORDER BY id",
+      );
+      return result.rows.map((row) => ({
+        contentId: row.id,
+        contentKey: row.content_key,
+        contentType: row.content_type,
+        slug: row.slug,
+        status: row.status,
+        archivedAt: row.archived_at,
+        publishedRevisionId: row.published_revision_id,
+      }));
+    });
+  }
+
   async listRevisions(
     contentId: string,
     limit: number,
@@ -733,6 +765,7 @@ export class ContentCatalogRepository {
          ) AS searchable_text
        ) AS search
        WHERE item.status = 'PUBLISHED'
+         AND item.content_type = 'article'
          AND item.archived_at IS NULL
          AND position(lower($1) in lower(search.searchable_text)) > 0
        ORDER BY
@@ -981,6 +1014,7 @@ function mapLifecycle(item: ContentRow): ContentLifecycleRecord {
   return {
     contentId: item.id,
     contentKey: item.content_key,
+    contentType: item.content_type,
     slug: item.slug,
     status: item.status,
     latestRevisionId: item.latest_revision_id,

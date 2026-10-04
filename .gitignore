@@ -1,6 +1,7 @@
 node_modules/
 dist/
 content-import-reports/
+content-route-preflight-reports/
 coverage/
 .env
 .env.*

@@ -1,4 +1,5 @@
 import type { ContentDocumentV1 } from './content-document';
+import type { ContentArticleRouteReason } from './content-slug';
 
 export const CONTENT_STATUS = {
   DRAFT: 'DRAFT',
@@ -10,9 +11,64 @@ export const CONTENT_STATUS = {
 export type ContentStatus =
   (typeof CONTENT_STATUS)[keyof typeof CONTENT_STATUS];
 
+export type ContentRoutePreflightSeverity = 'BLOCKER' | 'WARNING' | 'INFO';
+
+export interface ContentArticleRouteAuditRow {
+  contentId: string;
+  contentKey: string;
+  contentType: 'article';
+  slug: string;
+  status: ContentStatus;
+  archivedAt: Date | null;
+  publishedRevisionId: string | null;
+}
+
+export interface ContentArticleRoutePreflightItem extends Omit<
+  ContentArticleRouteAuditRow,
+  'archivedAt'
+> {
+  archivedAt: string | null;
+  classification: 'canonical' | 'invalid_route';
+  reason: ContentArticleRouteReason;
+  severity: ContentRoutePreflightSeverity;
+  suggestion: { slug: string; authoritative: false } | null;
+}
+
+export type ContentArticleRouteCollisionKind =
+  | 'multiple_suggested_routes'
+  | 'active_canonical_route_owner'
+  | 'archived_canonical_route_owner';
+
+export interface ContentArticleRouteCollision {
+  kind: ContentArticleRouteCollisionKind;
+  suggestedSlug: string;
+  severity: 'BLOCKER' | 'WARNING';
+  candidateContentIds: string[];
+  ownerContentIds: string[];
+}
+
+export interface ContentArticleRoutePreflightReport {
+  schemaVersion: 1;
+  summary: {
+    totalArticles: number;
+    canonical: number;
+    invalid: number;
+    activeInvalid: number;
+    publishedInvalid: number;
+    draftReviewInvalid: number;
+    archivedInvalid: number;
+    suggestionCollisions: number;
+    blockers: number;
+    warnings: number;
+  };
+  rows: ContentArticleRoutePreflightItem[];
+  suggestionCollisions: ContentArticleRouteCollision[];
+}
+
 export interface ContentLifecycleRecord {
   contentId: string;
   contentKey: string;
+  contentType: 'article';
   slug: string;
   status: ContentStatus;
   latestRevisionId: string | null;
@@ -247,6 +303,13 @@ export class ContentSlugConflictError extends Error {
   constructor() {
     super('A non-archived content item already uses this slug.');
     this.name = 'ContentSlugConflictError';
+  }
+}
+
+export class ContentRouteNotPublishableError extends Error {
+  constructor() {
+    super('The content item does not have a canonical public article route.');
+    this.name = 'ContentRouteNotPublishableError';
   }
 }
 

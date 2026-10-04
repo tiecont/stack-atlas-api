@@ -11,9 +11,13 @@ import {
   ContentSlugConflictError,
   ContentCatalogNotReadyError,
   ContentCatalogSnapshotConflictError,
+  ContentRouteNotPublishableError,
 } from '../types/content-catalog.types';
 import { ContentDocumentValidationError } from '../types/content-document';
-import { ContentSlugValidationError } from '../types/content-slug';
+import {
+  ContentArticleRouteValidationError,
+  ContentSlugValidationError,
+} from '../types/content-slug';
 import { ContentCursorValidationError } from './content-pagination';
 
 export async function withContentProblems<T>(
@@ -96,6 +100,13 @@ function toContentProblem(error: unknown): StructuredProblemException | null {
       'Another active content item already uses this slug.',
     );
   }
+  if (error instanceof ContentRouteNotPublishableError) {
+    return new StructuredProblemException(
+      409,
+      'content_route_not_publishable',
+      'The content item does not have a canonical public article route.',
+    );
+  }
   if (error instanceof ContentIdentityConflictError) {
     return new StructuredProblemException(
       409,
@@ -108,6 +119,13 @@ function toContentProblem(error: unknown): StructuredProblemException | null {
       400,
       'invalid_content_search',
       'The search query must be a string no longer than 160 characters.',
+    );
+  }
+  if (error instanceof ContentArticleRouteValidationError) {
+    return new StructuredProblemException(
+      400,
+      'invalid_content_route',
+      'The article route must match articles/<domain>/<slug>.',
     );
   }
   if (

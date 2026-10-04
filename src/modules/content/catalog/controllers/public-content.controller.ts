@@ -88,9 +88,18 @@ export class PublicContentController {
   @Get(':slug')
   @Header('Cache-Control', 'no-store')
   @ApiOperation({ summary: 'Get a published content document by slug' })
-  @ApiParam({ name: 'slug', description: 'URL-encoded content route slug' })
+  @ApiParam({
+    name: 'slug',
+    description:
+      'URL-encoded canonical article route slug in articles/<domain>/<slug> form',
+  })
   @ApiOkResponse({ type: PublicContentResponseDto })
-  @ApiResponse(problemDetailsResponse(400, 'Invalid content slug'))
+  @ApiResponse(
+    problemDetailsResponse(
+      400,
+      'Invalid canonical article route (code: invalid_content_route; retryable: false; message: The article route must match articles/<domain>/<slug>.)',
+    ),
+  )
   @ApiNotFoundResponse(
     problemDetailsResponse(404, 'Published content was not found'),
   )

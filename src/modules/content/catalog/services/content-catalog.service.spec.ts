@@ -3,14 +3,20 @@ import { PLATFORM_PERMISSION } from '../../../identity/platform-authorization/co
 import type { PlatformAuthorizationService } from '../../../identity/platform-authorization/services/platform-authorization.service';
 import { ContentCatalogService } from './content-catalog.service';
 import type { ContentCatalogRepository } from '../repositories/content-catalog.repository';
+import type { PublishedContentRecord } from '../types/content-catalog.types';
 import {
   CONTENT_STATUS,
   ContentLifecycleTransitionError,
   ContentPermissionDeniedError,
   ContentSearchValidationError,
   ContentCatalogSnapshotConflictError,
+  ContentRouteNotPublishableError,
 } from '../types/content-catalog.types';
-import { ContentDocumentValidationError } from '../types/content-document';
+import {
+  ContentDocumentValidationError,
+  validateContentDocument,
+} from '../types/content-document';
+import { ContentArticleRouteValidationError } from '../types/content-slug';
 import type { AuthenticatedPrincipal } from '../../../identity/authentication/types/authenticated-principal';
 import { checksumContent } from '../helpers/content-checksum';
 import { ContentCatalogNotReadyError } from '../types/content-catalog.types';
@@ -63,6 +69,7 @@ function createRepository() {
     storeGitContentCatalogSnapshot: vi.fn(),
     findPublicContentCatalog: vi.fn(),
     findLifecycle: vi.fn(),
+    listArticleRoutePreflightRows: vi.fn(),
     transitionStatus: vi.fn(),
     listContent: vi.fn(),
     listRevisions: vi.fn(),
@@ -82,6 +89,7 @@ function createRepository() {
     | 'storeGitContentCatalogSnapshot'
     | 'findPublicContentCatalog'
     | 'findLifecycle'
+    | 'listArticleRoutePreflightRows'
     | 'transitionStatus'
     | 'listContent'
     | 'listRevisions'
@@ -98,7 +106,8 @@ function lifecycle(status: keyof typeof CONTENT_STATUS) {
   return {
     contentId: 'content-1',
     contentKey: 'article:reliable-systems',
-    slug: 'reliable-systems',
+    contentType: 'article' as const,
+    slug: 'articles/architecture/reliable-systems',
     status: CONTENT_STATUS[status],
     latestRevisionId: 'revision-1',
     publishedRevisionId: null,
@@ -110,15 +119,35 @@ function lifecycle(status: keyof typeof CONTENT_STATUS) {
   };
 }
 
+function publishedContent(slug: string, index: number): PublishedContentRecord {
+  return {
+    contentId: `content-${index}`,
+    contentKey: `article:content-${index}`,
+    contentType: 'article',
+    slug,
+    status: CONTENT_STATUS.PUBLISHED,
+    createdBy: principal.accountId,
+    revisionCreatedBy: principal.accountId,
+    revisionId: `revision-${index}`,
+    revisionNumber: 1,
+    schemaVersion: 1,
+    checksumSha256: 'a'.repeat(64),
+    document: validateContentDocument(document),
+    createdAt: new Date('2026-10-02T00:00:00.000Z'),
+    publishedAt: new Date('2026-10-02T00:00:00.000Z'),
+    publishedBy: principal.accountId,
+  };
+}
+
 describe('ContentCatalogService', () => {
-  it('normalizes slug and attributes item and first revision to the authenticated principal', async () => {
+  it('normalizes a canonical article route and attributes item and revision to the principal', async () => {
     const repository = createRepository();
     const authorization = createAuthorization();
     const service = new ContentCatalogService(repository, authorization);
 
     await service.createArticle(
       'article:reliable-systems',
-      '  Reliable   Systems  ',
+      ' ARTICLES / Architecture / Reliable   Systems ',
       document,
       principal,
     );
@@ -128,14 +157,14 @@ describe('ContentCatalogService', () => {
     ]);
     expect(repository.createArticle).toHaveBeenCalledWith({
       contentKey: 'article:reliable-systems',
-      slug: 'reliable-systems',
+      slug: 'articles/architecture/reliable-systems',
       actorAccountId: principal.accountId,
       document,
       checksumSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
   });
 
-  it('rejects reserved slugs and invalid documents before persistence', async () => {
+  it('rejects non-canonical article routes and invalid documents before persistence', async () => {
     const repository = createRepository();
     const service = new ContentCatalogService(
       repository,
@@ -145,20 +174,159 @@ describe('ContentCatalogService', () => {
     await expect(
       service.createArticle(
         'article:reliable-systems',
-        'admin/posts',
+        'engineering/new-guide',
         document,
         principal,
       ),
-    ).rejects.toThrow('reserved route segment');
+    ).rejects.toBeInstanceOf(ContentArticleRouteValidationError);
     await expect(
       service.createArticle(
         'article:reliable-systems',
-        'reliable-systems',
+        'articles/architecture/reliable-systems',
         { ...document, blocks: [{ type: 'paragraph' }] },
         principal,
       ),
     ).rejects.toBeInstanceOf(ContentDocumentValidationError);
     expect(repository.createArticle).not.toHaveBeenCalled();
+  });
+
+  it('requires the canonical route on published Git imports', async () => {
+    const repository = createRepository();
+    repository.createPublishedArticle.mockResolvedValue({} as never);
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(
+      service.createPublishedGitImportArticle(
+        {
+          contentKey: 'article:git-route',
+          slug: 'engineering/new-guide',
+          document,
+        },
+        principal,
+      ),
+    ).rejects.toBeInstanceOf(ContentArticleRouteValidationError);
+    expect(repository.createPublishedArticle).not.toHaveBeenCalled();
+
+    await service.createPublishedGitImportArticle(
+      {
+        contentKey: 'article:git-route',
+        slug: 'articles/architecture/new-guide',
+        document,
+      },
+      principal,
+    );
+    expect(repository.createPublishedArticle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contentKey: 'article:git-route',
+        slug: 'articles/architecture/new-guide',
+      }),
+    );
+  });
+
+  it('blocks publication of a historical non-canonical route before persistence', async () => {
+    const repository = createRepository();
+    repository.findLifecycle.mockResolvedValue({
+      ...lifecycle('IN_REVIEW'),
+      slug: 'legacy-domain/legacy-article',
+    });
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(
+      service.publishRevision('content-1', 'revision-1', principal),
+    ).rejects.toBeInstanceOf(ContentRouteNotPublishableError);
+    expect(repository.findRevision).not.toHaveBeenCalled();
+    expect(repository.publishRevision).not.toHaveBeenCalled();
+  });
+
+  it('preserves canonical publication behavior and validates public lookup routes', async () => {
+    const repository = createRepository();
+    repository.findLifecycle.mockResolvedValue(lifecycle('IN_REVIEW'));
+    repository.findRevision.mockResolvedValue({ document } as never);
+    repository.publishRevision.mockResolvedValue({} as never);
+    repository.findPublishedBySlug.mockResolvedValue(null);
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await service.publishRevision('content-1', 'revision-1', principal);
+    expect(repository.publishRevision).toHaveBeenCalledWith({
+      contentId: 'content-1',
+      revisionId: 'revision-1',
+      expectedStatus: CONTENT_STATUS.IN_REVIEW,
+      actorAccountId: principal.accountId,
+    });
+
+    expect(() => service.findPublishedBySlug('engineering/new-guide')).toThrow(
+      ContentArticleRouteValidationError,
+    );
+    expect(repository.findPublishedBySlug).not.toHaveBeenCalled();
+    await expect(
+      service.findPublishedBySlug('articles/architecture/reliable-systems'),
+    ).resolves.toBeNull();
+    expect(repository.findPublishedBySlug).toHaveBeenCalledWith(
+      'articles/architecture/reliable-systems',
+    );
+  });
+
+  it('builds its operator preflight from repository-owned article rows', async () => {
+    const repository = createRepository();
+    repository.listArticleRoutePreflightRows.mockResolvedValue([
+      {
+        contentId: 'canonical-id',
+        contentKey: 'article:canonical',
+        contentType: 'article',
+        slug: 'articles/architecture/guide',
+        status: 'DRAFT',
+        archivedAt: null,
+        publishedRevisionId: null,
+      },
+      {
+        contentId: 'legacy-id',
+        contentKey: 'article:legacy',
+        contentType: 'article',
+        slug: 'architecture/old-guide',
+        status: 'PUBLISHED',
+        archivedAt: null,
+        publishedRevisionId: 'revision-legacy',
+      },
+    ]);
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(service.preflightArticleRoutes()).resolves.toMatchObject({
+      summary: {
+        totalArticles: 2,
+        canonical: 1,
+        invalid: 1,
+        publishedInvalid: 1,
+        blockers: 1,
+      },
+      rows: [
+        expect.objectContaining({
+          contentId: 'canonical-id',
+          classification: 'canonical',
+          severity: 'INFO',
+        }),
+        expect.objectContaining({
+          contentId: 'legacy-id',
+          reason: 'missing_articles_prefix',
+          suggestion: {
+            slug: 'articles/architecture/old-guide',
+            authoritative: false,
+          },
+        }),
+      ],
+    });
+    expect(repository.listArticleRoutePreflightRows).toHaveBeenCalledOnce();
   });
 
   it('requires a base revision and records the authenticated revision creator', async () => {
@@ -191,13 +359,16 @@ describe('ContentCatalogService', () => {
     const authorization = createAuthorization();
     const service = new ContentCatalogService(repository, authorization);
 
-    await service.findGitImportStateBySlug(' Articles/Stable ', principal);
+    await service.findGitImportStateBySlug(
+      'articles/architecture/stable',
+      principal,
+    );
 
     expect(authorization.hasPermissions).toHaveBeenCalledWith(principal, [
       PLATFORM_PERMISSION.CONTENT_READ,
     ]);
     expect(repository.findImportStateBySlug).toHaveBeenCalledWith(
-      'articles/stable',
+      'articles/architecture/stable',
     );
   });
 
@@ -212,11 +383,41 @@ describe('ContentCatalogService', () => {
     expect(await service.searchPublishedContent('  transaction  ')).toEqual([]);
     expect(repository.searchPublishedContent).toHaveBeenCalledWith(
       'transaction',
-      20,
+      100,
     );
     expect(await service.searchPublishedContent('   ')).toEqual([]);
     expect(await service.searchPublishedContent(undefined)).toEqual([]);
     expect(repository.searchPublishedContent).toHaveBeenCalledOnce();
+  });
+
+  it('filters legacy search candidates before returning up to twenty canonical matches', async () => {
+    const repository = createRepository();
+    const invalidCandidates = Array.from({ length: 12 }, (_, index) =>
+      publishedContent(`engineering/legacy-guide-${index}`, index),
+    );
+    const canonicalCandidates = Array.from({ length: 25 }, (_, index) =>
+      publishedContent(
+        `articles/architecture/canonical-guide-${index}`,
+        index + invalidCandidates.length,
+      ),
+    );
+    repository.searchPublishedContent.mockResolvedValue([
+      ...invalidCandidates,
+      ...canonicalCandidates,
+    ]);
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    const results = await service.searchPublishedContent('guide');
+
+    expect(repository.searchPublishedContent).toHaveBeenCalledWith(
+      'guide',
+      100,
+    );
+    expect(results).toEqual(canonicalCandidates.slice(0, 20));
+    expect(results).toHaveLength(20);
   });
 
   it('rejects malformed and oversized public content queries', async () => {
@@ -295,13 +496,13 @@ describe('ContentCatalogService', () => {
           tags: [],
           difficulty: 'unspecified',
           learningPaths: [{ pathId: 'backend', moduleId: 'foundations' }],
-          prerequisites: [],
-          related: [],
+          prerequisites: ['alpha'],
+          related: ['alpha'],
           labs: [],
           authors: [],
           kubernetes: null,
           review: null,
-          legacyUrls: [],
+          legacyUrls: ['/season-01-fundamentals/beta.html'],
         },
       ],
       redirects: [],
@@ -316,9 +517,18 @@ describe('ContentCatalogService', () => {
         {
           contentId: 'content-alpha',
           contentKey: 'article:alpha',
-          slug: 'articles/architecture/alpha',
+          slug: 'engineering/legacy-alpha',
           publishedRevisionId: 'revision-alpha',
-          title: 'Alpha from published revision',
+          title: 'Legacy Alpha from published revision',
+          description: 'Published description.',
+          publishedAt: new Date('2026-10-02T00:00:00.000Z'),
+        },
+        {
+          contentId: 'content-beta',
+          contentKey: 'article:beta',
+          slug: 'articles/architecture/beta',
+          publishedRevisionId: 'revision-beta',
+          title: 'Beta from published revision',
           description: 'Published description.',
           publishedAt: new Date('2026-10-02T00:00:00.000Z'),
         },
@@ -333,17 +543,23 @@ describe('ContentCatalogService', () => {
 
     expect(result.articles).toHaveLength(1);
     expect(result.articles[0]).toMatchObject({
-      sourceId: 'alpha',
-      title: 'Alpha from published revision',
-      url: '/articles/architecture/alpha/',
+      sourceId: 'beta',
+      title: 'Beta from published revision',
+      url: '/articles/architecture/beta/',
+      prerequisites: [],
       related: [],
     });
-    expect(result.paths[0]?.modules[0]?.articleIds).toEqual(['alpha']);
+    expect(result.paths[0]?.modules[0]?.articleIds).toEqual(['beta']);
     expect(result.redirects).toContainEqual({
-      source: '/season-01-fundamentals/alpha.html',
-      destination: '/articles/architecture/alpha/',
+      source: '/season-01-fundamentals/beta.html',
+      destination: '/articles/architecture/beta/',
       kind: 'article',
     });
+    expect(result.redirects).not.toContainEqual(
+      expect.objectContaining({
+        source: '/season-01-fundamentals/alpha.html',
+      }),
+    );
   });
 
   it('reports catalog service unavailability before the first verified import', async () => {
@@ -417,7 +633,7 @@ describe('ContentCatalogService', () => {
     await expect(
       service.createArticle(
         'article:reliable-systems',
-        'reliable-systems',
+        'articles/architecture/reliable-systems',
         document,
         principal,
       ),
@@ -434,7 +650,7 @@ describe('ContentCatalogService', () => {
     await service.createPublishedGitImportArticle(
       {
         contentKey: 'article:reliable-systems',
-        slug: 'articles/reliable-systems',
+        slug: 'articles/architecture/reliable-systems',
         document,
       },
       principal,
@@ -447,7 +663,7 @@ describe('ContentCatalogService', () => {
     ]);
     expect(repository.createPublishedArticle).toHaveBeenCalledWith({
       contentKey: 'article:reliable-systems',
-      slug: 'articles/reliable-systems',
+      slug: 'articles/architecture/reliable-systems',
       actorAccountId: principal.accountId,
       document,
       checksumSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -462,13 +678,13 @@ describe('ContentCatalogService', () => {
     );
     await service.createArticle(
       'article:reliable-systems',
-      'reliable-systems',
+      'articles/architecture/reliable-systems',
       document,
       principal,
     );
     await service.createArticle(
       'article:another-key',
-      'another-key',
+      'articles/architecture/another-key',
       {
         blocks: document.blocks,
         description: document.description,
