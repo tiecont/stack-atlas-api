@@ -11,6 +11,8 @@ import {
   ContentSearchValidationError,
   ContentCatalogSnapshotConflictError,
   ContentRouteNotPublishableError,
+  ContentRouteConflictError,
+  ContentRouteRemediationRequiredError,
 } from '../types/content-catalog.types';
 import {
   ContentDocumentValidationError,
@@ -57,6 +59,7 @@ function createRepository() {
   return {
     createArticle: vi.fn(),
     createPublishedArticle: vi.fn(),
+    changeArticleRoute: vi.fn(),
     findImportStateByKey: vi.fn(),
     findImportStateBySlug: vi.fn(),
     appendRevision: vi.fn(),
@@ -77,6 +80,7 @@ function createRepository() {
     ContentCatalogRepository,
     | 'createArticle'
     | 'createPublishedArticle'
+    | 'changeArticleRoute'
     | 'findImportStateByKey'
     | 'findImportStateBySlug'
     | 'appendRevision'
@@ -533,6 +537,20 @@ describe('ContentCatalogService', () => {
           publishedAt: new Date('2026-10-02T00:00:00.000Z'),
         },
       ],
+      routeRedirects: [
+        {
+          sourceSlug: 'articles/architecture/old-beta',
+          currentSlug: 'articles/architecture/beta',
+        },
+        {
+          sourceSlug: 'articles/architecture/older-beta',
+          currentSlug: 'articles/architecture/beta',
+        },
+        {
+          sourceSlug: 'articles/architecture/unpublished-legacy',
+          currentSlug: 'engineering/non-canonical',
+        },
+      ],
     });
     const service = new ContentCatalogService(
       repository,
@@ -555,6 +573,21 @@ describe('ContentCatalogService', () => {
       destination: '/articles/architecture/beta/',
       kind: 'article',
     });
+    expect(result.redirects).toContainEqual({
+      source: '/articles/architecture/old-beta/',
+      destination: '/articles/architecture/beta/',
+      kind: 'article',
+    });
+    expect(result.redirects).toContainEqual({
+      source: '/articles/architecture/older-beta/',
+      destination: '/articles/architecture/beta/',
+      kind: 'article',
+    });
+    expect(
+      result.redirects.some((redirect) =>
+        redirect.source.includes('unpublished-legacy'),
+      ),
+    ).toBe(false);
     expect(result.redirects).not.toContainEqual(
       expect.objectContaining({
         source: '/season-01-fundamentals/alpha.html',
@@ -591,6 +624,45 @@ describe('ContentCatalogService', () => {
         redirects: [],
       },
       publishedArticles: [],
+      routeRedirects: [],
+    });
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(service.getPublicContentCatalog()).rejects.toBeInstanceOf(
+      ContentCatalogSnapshotConflictError,
+    );
+  });
+
+  it('fails safely when one public redirect source has conflicting destinations', async () => {
+    const catalogSnapshot = {
+      schema_version: 1,
+      site: { name: 'Stack Atlas', description: 'Catalog.', language: 'vi' },
+      topics: [],
+      categories: [],
+      paths: [],
+      articles: [],
+      redirects: [],
+    } as const;
+    const repository = createRepository();
+    repository.findPublicContentCatalog.mockResolvedValue({
+      sourceCommitSha: 'a'.repeat(40),
+      checksumSha256: checksumContent(catalogSnapshot),
+      createdAt: new Date('2026-10-03T00:00:00.000Z'),
+      catalog: catalogSnapshot,
+      publishedArticles: [],
+      routeRedirects: [
+        {
+          sourceSlug: 'articles/architecture/old-route',
+          currentSlug: 'articles/architecture/current-one',
+        },
+        {
+          sourceSlug: 'articles/architecture/old-route',
+          currentSlug: 'articles/architecture/current-two',
+        },
+      ],
     });
     const service = new ContentCatalogService(
       repository,
@@ -624,6 +696,126 @@ describe('ContentCatalogService', () => {
     expect(repository.transitionStatus).toHaveBeenCalledOnce();
   });
 
+  it('requires content:publish and forwards the expected route and authenticated actor', async () => {
+    const repository = createRepository();
+    const authorization = createAuthorization();
+    const service = new ContentCatalogService(repository, authorization);
+    repository.findLifecycle.mockResolvedValue(lifecycle('PUBLISHED'));
+    repository.changeArticleRoute.mockResolvedValue(lifecycle('PUBLISHED'));
+
+    await service.changeArticleRoute(
+      'content-1',
+      'articles/architecture/reliable-systems',
+      ' ARTICLES / Architecture / new guide ',
+      principal,
+    );
+
+    expect(authorization.hasPermissions).toHaveBeenCalledWith(principal, [
+      PLATFORM_PERMISSION.CONTENT_PUBLISH,
+    ]);
+    expect(repository.changeArticleRoute).toHaveBeenCalledWith({
+      contentId: 'content-1',
+      baseSlug: 'articles/architecture/reliable-systems',
+      slug: 'articles/architecture/new-guide',
+      actorAccountId: principal.accountId,
+    });
+  });
+
+  it('rejects an invalid destination before repository access', async () => {
+    const repository = createRepository();
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    await expect(
+      service.changeArticleRoute(
+        'content-1',
+        'articles/architecture/reliable-systems',
+        'engineering/new-guide',
+        principal,
+      ),
+    ).rejects.toBeInstanceOf(ContentArticleRouteValidationError);
+    expect(repository.findLifecycle).not.toHaveBeenCalled();
+    expect(repository.changeArticleRoute).not.toHaveBeenCalled();
+  });
+
+  it('rejects stale, historical, and archived route changes before persistence', async () => {
+    const repository = createRepository();
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+
+    repository.findLifecycle.mockResolvedValue(lifecycle('DRAFT'));
+    await expect(
+      service.changeArticleRoute(
+        'content-1',
+        'articles/architecture/stale-route',
+        'articles/architecture/new-guide',
+        principal,
+      ),
+    ).rejects.toBeInstanceOf(ContentRouteConflictError);
+    await expect(
+      service.changeArticleRoute(
+        'content-1',
+        'articles/architecture/stale-route',
+        'articles/architecture/reliable-systems',
+        principal,
+      ),
+    ).rejects.toBeInstanceOf(ContentRouteConflictError);
+
+    repository.findLifecycle.mockResolvedValue({
+      ...lifecycle('DRAFT'),
+      slug: 'engineering/legacy-guide',
+    });
+    await expect(
+      service.changeArticleRoute(
+        'content-1',
+        'engineering/legacy-guide',
+        'articles/architecture/new-guide',
+        principal,
+      ),
+    ).rejects.toBeInstanceOf(ContentRouteRemediationRequiredError);
+
+    repository.findLifecycle.mockResolvedValue(lifecycle('ARCHIVED'));
+    await expect(
+      service.changeArticleRoute(
+        'content-1',
+        'articles/architecture/reliable-systems',
+        'articles/architecture/new-guide',
+        principal,
+      ),
+    ).rejects.toBeInstanceOf(ContentLifecycleTransitionError);
+    expect(repository.changeArticleRoute).not.toHaveBeenCalled();
+  });
+
+  it('keeps an identical canonical route as a repository-verified no-op', async () => {
+    const repository = createRepository();
+    const service = new ContentCatalogService(
+      repository,
+      createAuthorization(),
+    );
+    const current = lifecycle('DRAFT');
+    repository.findLifecycle.mockResolvedValue(current);
+    repository.changeArticleRoute.mockResolvedValue(current);
+
+    await expect(
+      service.changeArticleRoute(
+        'content-1',
+        current.slug,
+        current.slug,
+        principal,
+      ),
+    ).resolves.toBe(current);
+    expect(repository.changeArticleRoute).toHaveBeenCalledWith({
+      contentId: 'content-1',
+      baseSlug: current.slug,
+      slug: current.slug,
+      actorAccountId: principal.accountId,
+    });
+  });
+
   it('denies writes before repository access when the principal lacks permission', async () => {
     const repository = createRepository();
     const authorization = createAuthorization();
@@ -639,6 +831,24 @@ describe('ContentCatalogService', () => {
       ),
     ).rejects.toBeInstanceOf(ContentPermissionDeniedError);
     expect(repository.createArticle).not.toHaveBeenCalled();
+  });
+
+  it('denies route mutation without content:publish before item lookup', async () => {
+    const repository = createRepository();
+    const authorization = createAuthorization();
+    authorization.hasPermissions.mockResolvedValue(false);
+    const service = new ContentCatalogService(repository, authorization);
+
+    await expect(
+      service.changeArticleRoute(
+        'content-1',
+        'articles/architecture/reliable-systems',
+        'articles/architecture/new-guide',
+        principal,
+      ),
+    ).rejects.toBeInstanceOf(ContentPermissionDeniedError);
+    expect(repository.findLifecycle).not.toHaveBeenCalled();
+    expect(repository.changeArticleRoute).not.toHaveBeenCalled();
   });
 
   it('creates a published Git import with all required permissions and actor attribution', async () => {

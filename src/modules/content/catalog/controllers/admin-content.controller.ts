@@ -47,6 +47,7 @@ import {
   ContentRevisionResponseDto,
   ContentRevisionSummaryResponseDto,
   CreateContentDto,
+  ChangeContentRouteDto,
   CreateContentRevisionDto,
   ListContentQueryDto,
   ListRevisionsQueryDto,
@@ -139,6 +140,40 @@ export class AdminContentController {
   ): Promise<ContentItemResponseDto> {
     return withContentProblems(
       this.catalog.getContent(contentId, request.principal),
+    ).then(toContentItemResponse);
+  }
+
+  @Post(':id/change-route')
+  @UseGuards(SessionAuthGuard, OriginGuard, PermissionGuard)
+  @RequirePermissions(PLATFORM_PERMISSION.CONTENT_PUBLISH)
+  @Header('Cache-Control', 'no-store')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Change an article route and preserve its old route as history',
+  })
+  @ApiOkResponse({ type: ContentItemResponseDto })
+  @ApiResponse(problemDetailsResponse(400, 'Invalid canonical article route'))
+  @ApiResponse(problemDetailsResponse(401, 'A valid session is required'))
+  @ApiResponse(problemDetailsResponse(403, 'The session lacks content:publish'))
+  @ApiResponse(problemDetailsResponse(404, 'Content item not found'))
+  @ApiResponse(
+    problemDetailsResponse(
+      409,
+      'Stale route (content_route_conflict), reserved route (content_route_reserved), historical remediation required (content_route_remediation_required), or invalid lifecycle state',
+    ),
+  )
+  changeRoute(
+    @Param('id', new ParseUUIDPipe()) contentId: string,
+    @Body() input: ChangeContentRouteDto,
+    @Req() request: Request & AuthenticatedRequest,
+  ): Promise<ContentItemResponseDto> {
+    return withContentProblems(
+      this.catalog.changeArticleRoute(
+        contentId,
+        input.baseSlug,
+        input.slug,
+        request.principal,
+      ),
     ).then(toContentItemResponse);
   }
 

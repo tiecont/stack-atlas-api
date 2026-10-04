@@ -23,9 +23,12 @@ Both repositories keep independent copies of the same canonical JSON fixture:
   most 255 characters. Article writes trim surrounding whitespace, lowercase,
   replace whitespace with hyphens, and remove whitespace around `/` before
   validating. Normalization never adds or removes semantic route segments.
-  Only non-archived items reserve a slug. Until A01.2 remediation, historical
-  persisted rows may still contain non-canonical routes; Admin reads preserve
-  those values and public article projections exclude them.
+  Only non-archived items reserve a current slug. Once a canonical route is
+  changed through the Admin route endpoint, its prior route is stored as
+  immutable history and remains permanently reserved. Historical persisted
+  rows may still contain non-canonical routes; Admin reads preserve those
+  values and public article projections exclude them until approved A01.2.2
+  remediation.
 - V1 persists article content only. Other content kinds need an explicit schema
   before they are added.
 - Lifecycle is `DRAFT`, `IN_REVIEW`, `PUBLISHED`, or `ARCHIVED`. Allowed
@@ -39,7 +42,25 @@ Both repositories keep independent copies of the same canonical JSON fixture:
 - Archiving sets `archived_at` and `archived_by`, hides the item from published
   lookup, and preserves its revisions, publication history, and pointers.
   Restoring returns the item to `DRAFT`, clears archive metadata, and can fail
-  with a slug conflict if another active item now owns that route.
+  with a slug conflict if another active item owns that route or
+  `content_route_reserved` if route history reserves it. Archiving itself does
+  not create route history and still permits route reuse.
+- `POST /api/v1/admin/content/:id/change-route` requires `content:publish` and
+  accepts `baseSlug` plus a replacement `slug`. It supports canonical-to-
+  canonical changes while the item is `DRAFT`, `IN_REVIEW`, or `PUBLISHED`;
+  `ARCHIVED` items must be restored first. The exact `baseSlug` is compared
+  under the content-item row lock. A stale value returns retryable
+  `content_route_conflict`. A successful change stores the old canonical slug
+  against the content item in append-only route history and updates the
+  current slug in one transaction. Repeating the current slug with a matching
+  base is a no-op. Historical non-canonical current routes return
+  `content_route_remediation_required`; this endpoint does not remediate them.
+- Route history stores source routes against content identity, not a fixed
+  destination. After `A -> B -> C`, public redirects resolve both `A` and `B`
+  directly to `C`. A route source can never be reused as a current slug,
+  including when restoring an archived item. Public catalog route redirects
+  are exposed only while their target article is published, active, and has a
+  valid published revision.
 - New item creation and revisions record the authenticated principal's account
   as creator. Archive records the authenticated archiver. Actor IDs never come
   from content input. Existing rows receive a deterministic `legacy-<uuid>`

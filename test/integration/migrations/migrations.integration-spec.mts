@@ -84,6 +84,11 @@ describe('PostgreSQL migrations', () => {
             'content/catalog/migrations/1790964762558-AddPublicContentCatalog.ts',
           migration_kind: 'schema',
         },
+        {
+          migration_name:
+            'content/catalog/migrations/1791131085082-AddContentRouteRedirects.ts',
+          migration_kind: 'schema',
+        },
       ]),
     );
     const publicationActor = await pool!.query<{
@@ -115,13 +120,133 @@ describe('PostgreSQL migrations', () => {
            'users', 'sessions', 'content_items', 'content_revisions',
            'content_publications', 'platform_roles',
            'platform_role_permissions', 'user_platform_roles',
-           'content_catalog_snapshots', 'content_catalog_active_snapshot'
+           'content_catalog_snapshots', 'content_catalog_active_snapshot',
+           'content_route_redirects'
          )`,
     );
-    expect(ownedTables.rows[0]?.count).toBe(10);
+    expect(ownedTables.rows[0]?.count).toBe(11);
+  });
+
+  it('enforces canonical immutable route history and protects populated rollback', async () => {
+    const contentId = randomUUID();
+    const slug = `articles/architecture/route-history-${randomUUID()}`;
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_items (id, content_key, content_type, slug)
+       VALUES ($1, $2, 'article', $3)`,
+      [contentId, `article:${randomUUID()}`, slug],
+    );
+
+    const columns = await pool!.query<{
+      column_name: string;
+      is_nullable: string;
+      data_type: string;
+    }>(
+      `SELECT column_name, is_nullable, data_type
+       FROM information_schema.columns
+       WHERE table_schema = 'stack_atlas'
+         AND table_name = 'content_route_redirects'
+       ORDER BY ordinal_position`,
+    );
+    expect(columns.rows).toEqual([
+      { column_name: 'source_slug', is_nullable: 'NO', data_type: 'text' },
+      {
+        column_name: 'content_item_id',
+        is_nullable: 'NO',
+        data_type: 'uuid',
+      },
+      { column_name: 'created_by', is_nullable: 'YES', data_type: 'uuid' },
+      {
+        column_name: 'created_at',
+        is_nullable: 'NO',
+        data_type: 'timestamp with time zone',
+      },
+    ]);
+    const contentIndex = await pool!.query(
+      `SELECT indexname
+       FROM pg_indexes
+       WHERE schemaname = 'stack_atlas'
+         AND indexname = 'content_route_redirects_content_item_id_idx'`,
+    );
+    expect(contentIndex.rowCount).toBe(1);
+    const foreignKeys = await pool!.query<{
+      conname: string;
+      confdeltype: string;
+    }>(
+      `SELECT conname, confdeltype
+       FROM pg_constraint
+       WHERE conrelid = 'stack_atlas.content_route_redirects'::regclass
+         AND contype = 'f'
+       ORDER BY conname`,
+    );
+    expect(foreignKeys.rows).toEqual([
+      {
+        conname: 'content_route_redirects_content_item_id_fkey',
+        confdeltype: 'r',
+      },
+      {
+        conname: 'content_route_redirects_created_by_fkey',
+        confdeltype: 'r',
+      },
+    ]);
+
+    const source = `articles/architecture/old-route-${randomUUID()}`;
+    await pool!.query(
+      `INSERT INTO stack_atlas.content_route_redirects
+         (source_slug, content_item_id)
+       VALUES ($1, $2)`,
+      [source, contentId],
+    );
+    await expect(
+      pool!.query(
+        `INSERT INTO stack_atlas.content_route_redirects
+           (source_slug, content_item_id)
+         VALUES ($1, $2)`,
+        [source, contentId],
+      ),
+    ).rejects.toMatchObject({ code: '23505' });
+    await expect(
+      pool!.query(
+        `INSERT INTO stack_atlas.content_route_redirects
+           (source_slug, content_item_id)
+         VALUES ($1, $2)`,
+        [`engineering/legacy-${randomUUID()}`, contentId],
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      pool!.query(
+        `UPDATE stack_atlas.content_route_redirects
+         SET source_slug = $2 WHERE source_slug = $1`,
+        [source, `articles/architecture/updated-${randomUUID()}`],
+      ),
+    ).rejects.toMatchObject({ code: '55000' });
+    await expect(
+      pool!.query(
+        'DELETE FROM stack_atlas.content_route_redirects WHERE source_slug = $1',
+        [source],
+      ),
+    ).rejects.toMatchObject({ code: '55000' });
+
+    await expect(runMigrations('down')).rejects.toThrow(
+      'Refusing to roll back content route redirect history while rows exist',
+    );
+    const preserved = await pool!.query(
+      'SELECT source_slug FROM stack_atlas.content_route_redirects WHERE source_slug = $1',
+      [source],
+    );
+    expect(preserved.rowCount).toBe(1);
+
+    await pool!.query('TRUNCATE stack_atlas.content_route_redirects');
+    await runMigrations('down');
+    const rolledBack = await pool!.query(
+      "SELECT to_regclass('stack_atlas.content_route_redirects') AS table_name",
+    );
+    expect(rolledBack.rows[0]?.table_name).toBeNull();
+    await runMigrations('up');
+    await pool!.query('TRUNCATE stack_atlas.content_items CASCADE');
   });
 
   it('preserves published state when upgrading a legacy item with a publication pointer', async () => {
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
@@ -183,6 +308,7 @@ describe('PostgreSQL migrations', () => {
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
+    await runMigrations('down');
     await expect(runMigrations('down')).rejects.toThrow(
       'Refusing to roll back content lifecycle metadata while content items exist',
     );
@@ -226,6 +352,7 @@ describe('PostgreSQL migrations', () => {
 
     await runMigrations('down');
     await runMigrations('down');
+    await runMigrations('down');
     await expect(runMigrations('down')).rejects.toThrow(
       'Refusing to remove recorded publication actor attribution',
     );
@@ -244,6 +371,7 @@ describe('PostgreSQL migrations', () => {
   });
 
   it('normalizes upgrade rows and refuses normalization collisions without data loss', async () => {
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
@@ -416,6 +544,7 @@ describe('PostgreSQL migrations', () => {
     await pool!.query(
       'CREATE TABLE stack_atlas.migration_safety_probe (id integer)',
     );
+    await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');
     await runMigrations('down');

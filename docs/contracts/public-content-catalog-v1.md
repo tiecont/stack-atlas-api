@@ -55,7 +55,12 @@ revision id, publication time, and canonical URL. Draft, archived, and
 unpublished articles are omitted. Path module membership, prerequisites, and
 related article references are filtered to returned published article ids.
 Article legacy redirects target the current API slug. Path and module redirects
-retain their catalog destination.
+retain their catalog destination. Immutable API route history also contributes
+article redirects while the target item remains published, active, and has a
+valid published revision. History stores source routes against content
+identity, so after `A -> B -> C` both `A` and `B` redirect directly to `C`.
+Archived, draft, review, and otherwise ineligible targets do not expose their
+route-history redirects.
 
 The response does not contain article HTML, source HTML, Git file paths,
 account identifiers, or draft data. `checksumSha256` identifies the imported

@@ -61,5 +61,11 @@ remediation decision, and rerun the preflight against the target environment
 after remediation. The preflight does not itself establish that staging or
 production data is clean unless it is actually run against that environment.
 
-This phase does not add a final route constraint, perform automatic backfill,
-or persist route-history redirects.
+A01.2.1 adds immutable route-history storage for explicit canonical-to-
+canonical Admin changes. This preflight command remains read-only and does not
+create route history, repair existing rows, or rewrite a catalog snapshot.
+A01.2.2 remediation requires a target-environment inventory and an approved
+canonical mapping for each invalid row. A01.2.3 persistence tightening remains
+blocked until a post-remediation target-environment preflight is clean. No
+automatic backfill or final global canonical route constraint is part of
+A01.2.1.
