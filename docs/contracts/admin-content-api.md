@@ -22,6 +22,7 @@ may be cached for 60 seconds.
 | `GET`  | `/admin/content`                           | `content:read`    | Filtered, cursor-paginated items             |
 | `POST` | `/admin/content`                           | `content:create`  | New item and its first draft revision        |
 | `GET`  | `/admin/content/:id`                       | `content:read`    | Item metadata                                |
+| `POST` | `/admin/content/:id/change-route`          | `content:publish` | Change an article route and retain its history |
 | `GET`  | `/admin/content/:id/revisions`             | `content:read`    | Cursor-paginated revision summaries          |
 | `GET`  | `/admin/content/:id/revisions/:revisionId` | `content:read`    | Structured revision for preview              |
 | `POST` | `/admin/content/:id/revisions`             | `content:update`  | Append a draft revision                      |
@@ -37,6 +38,31 @@ record are applied at that boundary. Returning an item to draft or restoring an
 archived item remains available through the lifecycle service and is not part
 of this HTTP surface.
 
+Route changes accept the exact current `baseSlug` and a replacement `slug`.
+They are allowed for `DRAFT`, `IN_REVIEW`, and `PUBLISHED` items. The operation
+requires `content:publish`, an active session, and an allowed `Origin`; actor
+attribution comes from the authenticated principal. Only canonical-to-
+canonical route changes are supported. A stale `baseSlug` returns retryable
+`409 content_route_conflict`; a current or historical destination returns
+`409 content_route_reserved`; a non-canonical historical current route returns
+`409 content_route_remediation_required`; and an archived item returns the
+existing lifecycle transition conflict. A matching base and current slug is
+an idempotent no-op.
+
+Successful changes append the prior route to immutable
+`content_route_redirects` history, keyed by source route and content item.
+Every source route stays reserved. API and Git-import creates, route changes,
+and restores check that history under shared PostgreSQL transaction-scoped
+route locks. Each transaction deduplicates and sorts route names before taking
+the route locks, then locks the content item row. The locks are released at
+transaction end; route checks and writes are database-only and do not hold
+locks across network calls. Route-history lookup uses the source-route primary
+key, while the existing active-route unique index protects current owners.
+Archive does not create a redirect and still permits current route reuse;
+restoring can fail if the route was reused or later became redirect history.
+Multiple changes resolve directly to the item's current slug, so `A -> B -> C`
+serves redirects `A -> C` and `B -> C` without a chain.
+
 Create accepts `contentKey`, `slug`, and a validated Content Document V1
 `document`. New article writes persist a canonical slug with exactly
 `articles/<domain>/<slug>`; `domain` and the final segment use lowercase
@@ -47,11 +73,11 @@ The authenticated principal supplies creator, reviewer-transition, publisher,
 and archiver identity; request bodies cannot select an actor. Cursor and page
 size are bounded, and list status filters use the lifecycle enum.
 
-During the A01.1 transition, historical rows may still store non-canonical
-slugs until A01.2 remediation. Admin item, revision, and lifecycle responses
-return that persisted route identity as stored. Public lookup, search, and
-catalog projections expose canonical article routes only; this filtering
-does not change or archive historical rows.
+During the A01.2 transition, historical rows may still store non-canonical
+slugs until approved A01.2.2 remediation. Admin item, revision, and lifecycle
+responses return that persisted route identity as stored. Public lookup,
+search, and catalog projections expose canonical article routes only; this
+filtering does not change or archive historical rows.
 
 ## Concurrency And Publication
 
@@ -67,9 +93,10 @@ timestamp, and updates the published pointer and state. A foreign revision
 returns `404`; a stale lifecycle transition returns `409`. Publish also
 requires the stored item to have the canonical article route; a historical
 non-canonical slug returns `409 content_route_not_publishable` before any
-publication row or state change. The service checks this route before entering
-the existing locked publication transaction. Any later route-mutation feature
-must revalidate route eligibility under locking compatible with publication.
+publication row or state change. Route mutation locks the current and
+destination routes in sorted order, then locks and revalidates the content
+item before recording history and updating its slug. Publication and route
+mutation serialize on the content-item row.
 
 Public reads require both `status = 'PUBLISHED'` and a non-archived item with a
 revision matching its published pointer. There is no fallback to the latest
@@ -89,7 +116,8 @@ canonical route that is missing, unpublished, or archived keeps the existing
 Errors use RFC 9457 Problem Details with `application/problem+json`. Admin
 operations document `400` validation failures, `401` missing/invalid session,
 `403` missing permission, `404` missing item or item-owned revision, and `409`
-identity/slug conflict, stale revision, or invalid lifecycle state. Public
+identity/slug conflict, stale revision or route, reserved route, historical
+route remediation required, or invalid lifecycle state. Public
 slug lookup documents `400 invalid_content_route` with the message
 `The article route must match articles/<domain>/<slug>.` and `404`
 unpublished, missing, or archived content. Publish documents

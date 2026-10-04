@@ -222,6 +222,12 @@ export interface StoredPublicContentCatalog {
   createdAt: Date;
   catalog: unknown;
   publishedArticles: PublishedCatalogContentState[];
+  routeRedirects: ContentRouteRedirectState[];
+}
+
+export interface ContentRouteRedirectState {
+  sourceSlug: string;
+  currentSlug: string;
 }
 
 export interface ContentRevisionSummary {
@@ -292,6 +298,13 @@ export interface TransitionContentStatus {
   actorAccountId: string;
 }
 
+export interface ChangeContentArticleRoute {
+  contentId: string;
+  baseSlug: string;
+  slug: string;
+  actorAccountId: string;
+}
+
 export class ContentIdentityConflictError extends Error {
   constructor() {
     super('A content item with this content_key already exists.');
@@ -310,6 +323,31 @@ export class ContentRouteNotPublishableError extends Error {
   constructor() {
     super('The content item does not have a canonical public article route.');
     this.name = 'ContentRouteNotPublishableError';
+  }
+}
+
+export class ContentRouteConflictError extends Error {
+  constructor() {
+    super('The content route changed before this operation completed.');
+    this.name = 'ContentRouteConflictError';
+  }
+}
+
+export class ContentRouteReservedError extends Error {
+  constructor() {
+    super(
+      'Another current or historical content route already reserves this slug.',
+    );
+    this.name = 'ContentRouteReservedError';
+  }
+}
+
+export class ContentRouteRemediationRequiredError extends Error {
+  constructor() {
+    super(
+      'The existing content route requires explicit historical remediation.',
+    );
+    this.name = 'ContentRouteRemediationRequiredError';
   }
 }
 

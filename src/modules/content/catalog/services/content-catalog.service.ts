@@ -17,6 +17,7 @@ import type {
   StoredPublicContentCatalog,
   ContentStatus,
   ContentArticleRoutePreflightReport,
+  ContentCatalogRedirectV1,
 } from '../types/content-catalog.types';
 import {
   CONTENT_STATUS,
@@ -28,6 +29,8 @@ import {
   ContentCatalogNotReadyError,
   ContentCatalogSnapshotConflictError,
   ContentRouteNotPublishableError,
+  ContentRouteConflictError,
+  ContentRouteRemediationRequiredError,
 } from '../types/content-catalog.types';
 import {
   validateContentDocument,
@@ -55,6 +58,7 @@ type ContentCatalogStore = Pick<
   ContentCatalogRepository,
   | 'createArticle'
   | 'createPublishedArticle'
+  | 'changeArticleRoute'
   | 'findImportStateByKey'
   | 'findImportStateBySlug'
   | 'appendRevision'
@@ -323,6 +327,34 @@ export class ContentCatalogService {
     );
   }
 
+  async changeArticleRoute(
+    contentId: string,
+    baseSlug: string,
+    slug: unknown,
+    principal: AuthenticatedPrincipal,
+  ): Promise<ContentLifecycleRecord> {
+    await this.requirePermission(
+      principal,
+      PLATFORM_PERMISSION.CONTENT_PUBLISH,
+    );
+    const requestedSlug = normalizeArticleSlug(slug);
+    const current = await this.repository.findLifecycle(contentId);
+    if (!current) throw new ContentItemNotFoundError();
+    if (current.slug !== baseSlug) throw new ContentRouteConflictError();
+    if (current.status === CONTENT_STATUS.ARCHIVED) {
+      throw new ContentLifecycleTransitionError();
+    }
+    if (!isCanonicalArticleSlug(current.slug)) {
+      throw new ContentRouteRemediationRequiredError();
+    }
+    return this.repository.changeArticleRoute({
+      contentId,
+      baseSlug,
+      slug: requestedSlug,
+      actorAccountId: principal.accountId,
+    });
+  }
+
   findPublishedByKey(
     contentKey: string,
   ): Promise<PublishedContentRecord | null> {
@@ -412,7 +444,18 @@ export class ContentCatalogService {
         ),
       })),
     }));
-    const redirects = [
+    const redirects = mergePublicRedirects([
+      ...stored.routeRedirects
+        .filter(
+          (redirect) =>
+            isCanonicalArticleSlug(redirect.sourceSlug) &&
+            isCanonicalArticleSlug(redirect.currentSlug),
+        )
+        .map((redirect) => ({
+          source: `/${redirect.sourceSlug}/`,
+          destination: `/${redirect.currentSlug}/`,
+          kind: 'article' as const,
+        })),
       ...articles.flatMap((article) =>
         article.legacyUrls.map((source) => ({
           source,
@@ -434,7 +477,7 @@ export class ContentCatalogService {
           })),
         ),
       ]),
-    ];
+    ]);
     return {
       schema_version: 1,
       sourceCommitSha: stored.sourceCommitSha,
@@ -565,4 +608,24 @@ function assertAllowedTransition(
   if (!ALLOWED_TRANSITIONS[currentStatus].includes(nextStatus)) {
     throw new ContentLifecycleTransitionError();
   }
+}
+
+function mergePublicRedirects(
+  redirects: readonly ContentCatalogRedirectV1[],
+): ContentCatalogRedirectV1[] {
+  const bySource = new Map<string, ContentCatalogRedirectV1>();
+  for (const redirect of redirects) {
+    const existing = bySource.get(redirect.source);
+    if (!existing) {
+      bySource.set(redirect.source, redirect);
+      continue;
+    }
+    if (
+      existing.destination !== redirect.destination ||
+      existing.kind !== redirect.kind
+    ) {
+      throw new ContentCatalogSnapshotConflictError();
+    }
+  }
+  return [...bySource.values()];
 }

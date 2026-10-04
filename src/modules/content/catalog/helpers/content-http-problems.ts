@@ -12,6 +12,9 @@ import {
   ContentCatalogNotReadyError,
   ContentCatalogSnapshotConflictError,
   ContentRouteNotPublishableError,
+  ContentRouteConflictError,
+  ContentRouteRemediationRequiredError,
+  ContentRouteReservedError,
 } from '../types/content-catalog.types';
 import { ContentDocumentValidationError } from '../types/content-document';
 import {
@@ -91,6 +94,28 @@ function toContentProblem(error: unknown): StructuredProblemException | null {
       409,
       'content_lifecycle_transition_conflict',
       'The requested action is not allowed from the current content state.',
+    );
+  }
+  if (error instanceof ContentRouteConflictError) {
+    return new StructuredProblemException(
+      409,
+      'content_route_conflict',
+      'The content route changed before this operation completed. Reload the content and retry.',
+      true,
+    );
+  }
+  if (error instanceof ContentRouteReservedError) {
+    return new StructuredProblemException(
+      409,
+      'content_route_reserved',
+      'Another current or historical content route already reserves this slug.',
+    );
+  }
+  if (error instanceof ContentRouteRemediationRequiredError) {
+    return new StructuredProblemException(
+      409,
+      'content_route_remediation_required',
+      'This historical content route requires an approved remediation before it can be changed.',
     );
   }
   if (error instanceof ContentSlugConflictError) {

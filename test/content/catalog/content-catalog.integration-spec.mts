@@ -15,6 +15,9 @@ import {
   ContentRevisionConflictError,
   ContentRouteNotPublishableError,
   ContentSlugConflictError,
+  ContentRouteConflictError,
+  ContentRouteRemediationRequiredError,
+  ContentRouteReservedError,
 } from '../../../src/modules/content/catalog/types/content-catalog.types.js';
 import { ContentDocumentValidationError } from '../../../src/modules/content/catalog/types/content-document.js';
 import { validateContentDocument } from '../../../src/modules/content/catalog/types/content-document.js';
@@ -369,6 +372,504 @@ describe('PostgreSQL content catalog lifecycle', () => {
       published_revision_id: null,
       publication_count: '0',
     });
+  });
+
+  it('records canonical route history atomically and projects multi-hop redirects to the current route', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+    const routeA = `articles/architecture/route-history-a-${randomUUID()}`;
+    const routeB = `articles/architecture/route-history-b-${randomUUID()}`;
+    const routeC = `articles/architecture/route-history-c-${randomUUID()}`;
+    const article = await createPublishedArticle(
+      service,
+      `article:${randomUUID()}`,
+      routeA,
+      actor,
+    );
+    const sourceCommitSha = createHash('sha1')
+      .update(randomUUID())
+      .digest('hex');
+    await service.storeGitContentCatalogSnapshot(
+      sourceCommitSha,
+      catalogSnapshotForArticle(article.contentKey),
+      actor,
+    );
+    const snapshotBeforeMutation = await pool!.query(
+      `SELECT catalog, checksum_sha256
+       FROM stack_atlas.content_catalog_snapshots
+       WHERE source_commit_sha = $1`,
+      [sourceCommitSha],
+    );
+
+    const beforeNoop = await service.getContent(article.contentId, actor);
+    const noop = await service.changeArticleRoute(
+      article.contentId,
+      routeA,
+      routeA,
+      actor,
+    );
+    expect(noop.updatedAt).toEqual(beforeNoop.updatedAt);
+    const afterNoopHistory = await pool!.query(
+      'SELECT source_slug FROM stack_atlas.content_route_redirects WHERE content_item_id = $1',
+      [article.contentId],
+    );
+    expect(afterNoopHistory.rowCount).toBe(0);
+
+    await expect(
+      service.changeArticleRoute(article.contentId, routeA, routeB, actor),
+    ).resolves.toMatchObject({ slug: routeB, status: 'PUBLISHED' });
+    await expect(
+      service.changeArticleRoute(article.contentId, routeB, routeC, actor),
+    ).resolves.toMatchObject({ slug: routeC, status: 'PUBLISHED' });
+
+    const historyBeforePublicRead = await pool!.query<{
+      source_slug: string;
+      content_item_id: string;
+      created_by: string;
+      created_at: Date;
+    }>(
+      `SELECT source_slug, content_item_id, created_by, created_at
+       FROM stack_atlas.content_route_redirects
+       WHERE content_item_id = $1 ORDER BY source_slug`,
+      [article.contentId],
+    );
+    expect(historyBeforePublicRead.rows).toEqual(
+      [routeA, routeB]
+        .sort()
+        .map((source_slug) => ({
+          source_slug,
+          content_item_id: article.contentId,
+          created_by: actor.accountId,
+          created_at: expect.any(Date),
+        })),
+    );
+
+    const publicCatalog = await service.getPublicContentCatalog();
+    expect(publicCatalog.articles).toContainEqual(
+      expect.objectContaining({
+        contentId: article.contentId,
+        slug: routeC,
+        url: `/${routeC}/`,
+      }),
+    );
+    expect(publicCatalog.redirects).toEqual(
+      expect.arrayContaining([
+        { source: `/${routeA}/`, destination: `/${routeC}/`, kind: 'article' },
+        { source: `/${routeB}/`, destination: `/${routeC}/`, kind: 'article' },
+      ]),
+    );
+    const historyAfterPublicRead = await pool!.query(
+      `SELECT source_slug, content_item_id, created_by, created_at
+       FROM stack_atlas.content_route_redirects
+       WHERE content_item_id = $1 ORDER BY source_slug`,
+      [article.contentId],
+    );
+    expect(historyAfterPublicRead.rows).toEqual(historyBeforePublicRead.rows);
+    const snapshotAfterMutation = await pool!.query(
+      `SELECT catalog, checksum_sha256
+       FROM stack_atlas.content_catalog_snapshots
+       WHERE source_commit_sha = $1`,
+      [sourceCommitSha],
+    );
+    expect(snapshotAfterMutation.rows).toEqual(snapshotBeforeMutation.rows);
+
+    await service.archiveContent(article.contentId, actor);
+    const archivedCatalog = await service.getPublicContentCatalog();
+    expect(archivedCatalog.articles).not.toContainEqual(
+      expect.objectContaining({ contentId: article.contentId }),
+    );
+    expect(archivedCatalog.redirects).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: `/${routeA}/` }),
+        expect.objectContaining({ source: `/${routeB}/` }),
+      ]),
+    );
+    const persistedHistory = await pool!.query(
+      'SELECT source_slug FROM stack_atlas.content_route_redirects WHERE content_item_id = $1 ORDER BY source_slug',
+      [article.contentId],
+    );
+    expect(persistedHistory.rows.map((row) => row.source_slug)).toEqual(
+      [routeA, routeB].sort(),
+    );
+  });
+
+  it('reserves historical routes across create, Git import, rename, archive, and restore', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+    const originalRoute = `articles/architecture/reserved-${randomUUID()}`;
+    const activeRoute = `articles/architecture/active-${randomUUID()}`;
+    const movedRoute = `articles/architecture/moved-${randomUUID()}`;
+    const item = await service.createArticle(
+      `article:${randomUUID()}`,
+      originalRoute,
+      makeDocument('Route reservation'),
+      actor,
+    );
+    const activeOwner = await service.createArticle(
+      `article:${randomUUID()}`,
+      activeRoute,
+      makeDocument('Active destination'),
+      actor,
+    );
+    await expect(
+      service.changeArticleRoute(item.contentId, originalRoute, activeRoute, actor),
+    ).rejects.toBeInstanceOf(ContentRouteReservedError);
+    expect((await service.getContent(item.contentId, actor)).slug).toBe(
+      originalRoute,
+    );
+    const historyAfterDestinationConflict = await pool!.query(
+      'SELECT source_slug FROM stack_atlas.content_route_redirects WHERE content_item_id = $1',
+      [item.contentId],
+    );
+    expect(historyAfterDestinationConflict.rowCount).toBe(0);
+
+    const rollbackRoute = `articles/architecture/rollback-${randomUUID()}`;
+    const rollbackDestination = `articles/architecture/rollback-target-${randomUUID()}`;
+    const rollbackItem = await service.createArticle(
+      `article:${randomUUID()}`,
+      rollbackRoute,
+      makeDocument('Atomic route change rollback'),
+      actor,
+    );
+    await pool!.query(`
+      CREATE OR REPLACE FUNCTION stack_atlas.fail_test_content_route_change()
+      RETURNS trigger LANGUAGE plpgsql AS $function$
+      BEGIN
+        IF OLD.id = '${rollbackItem.contentId}'::uuid
+           AND NEW.slug IS DISTINCT FROM OLD.slug THEN
+          RAISE EXCEPTION 'injected content route update failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $function$
+    `);
+    await pool!.query(`
+      CREATE TRIGGER fail_test_content_route_change
+      BEFORE UPDATE OF slug ON stack_atlas.content_items
+      FOR EACH ROW EXECUTE FUNCTION stack_atlas.fail_test_content_route_change()
+    `);
+    try {
+      await expect(
+        service.changeArticleRoute(
+          rollbackItem.contentId,
+          rollbackRoute,
+          rollbackDestination,
+          actor,
+        ),
+      ).rejects.toThrow('injected content route update failure');
+    } finally {
+      await pool!.query(
+        'DROP TRIGGER IF EXISTS fail_test_content_route_change ON stack_atlas.content_items',
+      );
+      await pool!.query(
+        'DROP FUNCTION IF EXISTS stack_atlas.fail_test_content_route_change()',
+      );
+    }
+    const rollbackState = await pool!.query<{ slug: string; redirect_count: string }>(
+      `SELECT item.slug,
+              (SELECT count(*)::text FROM stack_atlas.content_route_redirects
+               WHERE content_item_id = item.id) AS redirect_count
+       FROM stack_atlas.content_items AS item WHERE item.id = $1`,
+      [rollbackItem.contentId],
+    );
+    expect(rollbackState.rows[0]).toEqual({
+      slug: rollbackRoute,
+      redirect_count: '0',
+    });
+
+    await service.changeArticleRoute(item.contentId, originalRoute, movedRoute, actor);
+    await expect(
+      service.changeArticleRoute(item.contentId, originalRoute, activeRoute, actor),
+    ).rejects.toBeInstanceOf(ContentRouteConflictError);
+    await expect(
+      service.createArticle(
+        `article:${randomUUID()}`,
+        originalRoute,
+        makeDocument('Recycled route'),
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ContentRouteReservedError);
+    await expect(
+      service.createPublishedGitImportArticle(
+        {
+          contentKey: `article:${randomUUID()}`,
+          slug: originalRoute,
+          document: makeDocument('Git import cannot recycle route'),
+        },
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ContentRouteReservedError);
+    await expect(
+      service.changeArticleRoute(
+        activeOwner.contentId,
+        activeRoute,
+        originalRoute,
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ContentRouteReservedError);
+
+    const repository = new ContentCatalogRepository(new DatabaseService(pool!));
+    const legacyDocument = validateContentDocument(makeDocument('Legacy route'));
+    const legacy = await repository.createArticle({
+      contentKey: `article:${randomUUID()}`,
+      slug: `engineering/legacy-${randomUUID()}`,
+      actorAccountId: actor.accountId,
+      document: legacyDocument,
+      checksumSha256: checksumContent(legacyDocument),
+    });
+    await expect(
+      service.changeArticleRoute(legacy.contentId, legacy.slug, movedRoute, actor),
+    ).rejects.toBeInstanceOf(ContentRouteRemediationRequiredError);
+    const legacyRow = await pool!.query<{ slug: string }>(
+      'SELECT slug FROM stack_atlas.content_items WHERE id = $1',
+      [legacy.contentId],
+    );
+    expect(legacyRow.rows[0]?.slug).toBe(legacy.slug);
+
+    const archivedRoute = `articles/architecture/archive-reuse-${randomUUID()}`;
+    const archivedOriginal = await service.createArticle(
+      `article:${randomUUID()}`,
+      archivedRoute,
+      makeDocument('Archived route owner'),
+      actor,
+    );
+    await service.archiveContent(archivedOriginal.contentId, actor);
+    const archiveHistory = await pool!.query(
+      'SELECT source_slug FROM stack_atlas.content_route_redirects WHERE content_item_id = $1',
+      [archivedOriginal.contentId],
+    );
+    expect(archiveHistory.rowCount).toBe(0);
+    const replacement = await service.createArticle(
+      `article:${randomUUID()}`,
+      archivedRoute,
+      makeDocument('Reused archived route'),
+      actor,
+    );
+    await expect(
+      service.restoreArchivedContent(archivedOriginal.contentId, actor),
+    ).rejects.toBeInstanceOf(ContentSlugConflictError);
+    expect(
+      (await service.getContent(archivedOriginal.contentId, actor)).status,
+    ).toBe('ARCHIVED');
+    expect(replacement.slug).toBe(archivedRoute);
+
+    await expect(
+      service.changeArticleRoute(
+        archivedOriginal.contentId,
+        archivedRoute,
+        `articles/architecture/after-archive-${randomUUID()}`,
+        actor,
+      ),
+    ).rejects.toBeInstanceOf(ContentLifecycleTransitionError);
+
+    const reviewItem = await service.createArticle(
+      `article:${randomUUID()}`,
+      `articles/architecture/in-review-${randomUUID()}`,
+      makeDocument('Review route change'),
+      actor,
+    );
+    await service.submitForReview(reviewItem.contentId, actor);
+    await expect(
+      service.changeArticleRoute(
+        reviewItem.contentId,
+        reviewItem.slug,
+        `articles/architecture/in-review-renamed-${randomUUID()}`,
+        actor,
+      ),
+    ).resolves.toMatchObject({ status: 'IN_REVIEW' });
+
+    const reservedRestoreRoute = `articles/architecture/restore-reserved-${randomUUID()}`;
+    const historyOwner = await service.createArticle(
+      `article:${randomUUID()}`,
+      reservedRestoreRoute,
+      makeDocument('Historical route owner'),
+      actor,
+    );
+    await service.archiveContent(historyOwner.contentId, actor);
+    const currentOwner = await service.createArticle(
+      `article:${randomUUID()}`,
+      reservedRestoreRoute,
+      makeDocument('Replacement route owner'),
+      actor,
+    );
+    const currentRoute = `articles/architecture/current-${randomUUID()}`;
+    await service.changeArticleRoute(
+      currentOwner.contentId,
+      reservedRestoreRoute,
+      currentRoute,
+      actor,
+    );
+    await expect(
+      service.restoreArchivedContent(historyOwner.contentId, actor),
+    ).rejects.toBeInstanceOf(ContentRouteReservedError);
+    expect((await service.getContent(historyOwner.contentId, actor)).status).toBe(
+      'ARCHIVED',
+    );
+  });
+
+  it('serializes competing route claims, restore, and renames with PostgreSQL advisory locks', async () => {
+    const actor = await createActor(pool!, true);
+    const service = createService(pool!);
+
+    const destinationSource = `articles/architecture/race-source-${randomUUID()}`;
+    const destination = `articles/architecture/race-destination-${randomUUID()}`;
+    const sourceItem = await service.createArticle(
+      `article:${randomUUID()}`,
+      destinationSource,
+      makeDocument('Rename versus destination create'),
+      actor,
+    );
+    const destinationRace = await Promise.allSettled([
+      service.changeArticleRoute(
+        sourceItem.contentId,
+        destinationSource,
+        destination,
+        actor,
+      ),
+      service.createArticle(
+        `article:${randomUUID()}`,
+        destination,
+        makeDocument('Competing destination create'),
+        actor,
+      ),
+    ]);
+    expect(
+      destinationRace.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const destinationOwners = await pool!.query(
+      `SELECT id FROM stack_atlas.content_items
+       WHERE slug = $1 AND archived_at IS NULL`,
+      [destination],
+    );
+    expect(destinationOwners.rowCount).toBe(1);
+
+    const sourceRoute = `articles/architecture/race-old-${randomUUID()}`;
+    const replacementRoute = `articles/architecture/race-new-${randomUUID()}`;
+    const sourceRaceItem = await service.createArticle(
+      `article:${randomUUID()}`,
+      sourceRoute,
+      makeDocument('Rename versus source create'),
+      actor,
+    );
+    const lockClient = await pool!.connect();
+    let lockTransaction = false;
+    let renamePromise: Promise<unknown> | null = null;
+    let createPromise: Promise<unknown> | null = null;
+    try {
+      await lockClient.query('BEGIN');
+      lockTransaction = true;
+      // This takes the same route-lock namespace as the repository to queue the rename first.
+      await lockClient.query(
+        'SELECT pg_advisory_xact_lock($1::integer, hashtext($2))',
+        [1129270852, sourceRoute],
+      );
+      renamePromise = service.changeArticleRoute(
+        sourceRaceItem.contentId,
+        sourceRoute,
+        replacementRoute,
+        actor,
+      );
+      await waitForRouteLockWait(pool!, 1);
+      createPromise = service.createArticle(
+        `article:${randomUUID()}`,
+        sourceRoute,
+        makeDocument('Competing source create'),
+        actor,
+      );
+      await waitForRouteLockWait(pool!, 2);
+      await lockClient.query('COMMIT');
+      lockTransaction = false;
+    } finally {
+      if (lockTransaction) await lockClient.query('ROLLBACK');
+      lockClient.release();
+    }
+    if (!renamePromise || !createPromise) {
+      throw new Error('Expected concurrent route claim operations to start.');
+    }
+    const [renameResult, sourceCreateResult] = await Promise.allSettled([
+      renamePromise,
+      createPromise,
+    ]);
+    expect(renameResult.status).toBe('fulfilled');
+    expect(sourceCreateResult).toMatchObject({
+      status: 'rejected',
+      reason: expect.any(ContentRouteReservedError),
+    });
+    const oldRouteOwner = await pool!.query(
+      `SELECT id FROM stack_atlas.content_items
+       WHERE slug = $1 AND archived_at IS NULL`,
+      [sourceRoute],
+    );
+    const oldRouteHistory = await pool!.query(
+      'SELECT content_item_id FROM stack_atlas.content_route_redirects WHERE source_slug = $1',
+      [sourceRoute],
+    );
+    expect(oldRouteOwner.rowCount).toBe(0);
+    expect(oldRouteHistory.rows[0]?.content_item_id).toBe(
+      sourceRaceItem.contentId,
+    );
+
+    const restoreRoute = `articles/architecture/race-restore-${randomUUID()}`;
+    const archived = await service.createArticle(
+      `article:${randomUUID()}`,
+      restoreRoute,
+      makeDocument('Restore race'),
+      actor,
+    );
+    await service.archiveContent(archived.contentId, actor);
+    const restoreRace = await Promise.allSettled([
+      service.restoreArchivedContent(archived.contentId, actor),
+      service.createArticle(
+        `article:${randomUUID()}`,
+        restoreRoute,
+        makeDocument('Create during restore'),
+        actor,
+      ),
+    ]);
+    expect(
+      restoreRace.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const restoreOwners = await pool!.query(
+      `SELECT id FROM stack_atlas.content_items
+       WHERE slug = $1 AND archived_at IS NULL`,
+      [restoreRoute],
+    );
+    expect(restoreOwners.rowCount).toBe(1);
+
+    const competingRoute = `articles/architecture/race-rename-source-${randomUUID()}`;
+    const competingOne = `articles/architecture/race-rename-one-${randomUUID()}`;
+    const competingTwo = `articles/architecture/race-rename-two-${randomUUID()}`;
+    const competingItem = await service.createArticle(
+      `article:${randomUUID()}`,
+      competingRoute,
+      makeDocument('Competing rename'),
+      actor,
+    );
+    const competingRenames = await Promise.allSettled([
+      service.changeArticleRoute(
+        competingItem.contentId,
+        competingRoute,
+        competingOne,
+        actor,
+      ),
+      service.changeArticleRoute(
+        competingItem.contentId,
+        competingRoute,
+        competingTwo,
+        actor,
+      ),
+    ]);
+    expect(
+      competingRenames.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      competingRenames.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    const renameHistory = await pool!.query(
+      'SELECT source_slug FROM stack_atlas.content_route_redirects WHERE content_item_id = $1',
+      [competingItem.contentId],
+    );
+    expect(renameHistory.rows).toEqual([{ source_slug: competingRoute }]);
   });
 
   it('audits legacy routes and collisions without changing content or catalog state', async () => {
@@ -889,6 +1390,76 @@ function createService(databasePool: Pool): ContentCatalogService {
       new PlatformAuthorizationRepository(database),
     ),
   );
+}
+
+async function createPublishedArticle(
+  service: ContentCatalogService,
+  contentKey: string,
+  slug: string,
+  actor: AuthenticatedPrincipal,
+): Promise<Awaited<ReturnType<ContentCatalogService['createArticle']>>> {
+  const revision = await service.createArticle(
+    contentKey,
+    slug,
+    makeDocument('Published route history article'),
+    actor,
+  );
+  await service.submitForReview(revision.contentId, actor);
+  await service.publishRevision(revision.contentId, revision.revisionId, actor);
+  return revision;
+}
+
+function catalogSnapshotForArticle(contentKey: string): unknown {
+  const sourceId = contentKey.slice('article:'.length);
+  return {
+    schema_version: 1,
+    site: {
+      name: 'Stack Atlas',
+      description: 'Content route history integration fixture.',
+      language: 'en',
+    },
+    topics: [],
+    categories: [],
+    paths: [],
+    articles: [
+      {
+        sourceId,
+        contentKey,
+        domain: 'architecture',
+        category: null,
+        tags: [],
+        difficulty: 'unspecified',
+        learningPaths: [],
+        prerequisites: [],
+        related: [],
+        labs: [],
+        authors: [],
+        kubernetes: null,
+        review: null,
+        legacyUrls: [],
+      },
+    ],
+    redirects: [],
+  };
+}
+
+async function waitForRouteLockWait(
+  databasePool: Pool,
+  expectedWaiters: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const result = await databasePool.query<{ count: number }>(
+      `SELECT count(*)::int AS count
+       FROM pg_stat_activity
+       WHERE pid <> pg_backend_pid()
+         AND datname = current_database()
+         AND wait_event_type = 'Lock'
+         AND query LIKE '%pg_advisory_xact_lock%'`,
+    );
+    if ((result.rows[0]?.count ?? 0) >= expectedWaiters) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for PostgreSQL route advisory lock waiters.');
 }
 
 async function createActor(

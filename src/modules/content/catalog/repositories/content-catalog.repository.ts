@@ -20,6 +20,8 @@ import type {
   TransitionContentStatus,
   ContentStatus,
   ContentArticleRouteAuditRow,
+  ChangeContentArticleRoute,
+  ContentRouteRedirectState,
 } from '../types/content-catalog.types';
 import {
   ContentIdentityConflictError,
@@ -30,7 +32,11 @@ import {
   ContentRevisionNotFoundError,
   ContentSlugConflictError,
   ContentCatalogSnapshotConflictError,
+  ContentRouteConflictError,
+  ContentRouteRemediationRequiredError,
+  ContentRouteReservedError,
 } from '../types/content-catalog.types';
+import { isCanonicalArticleSlug } from '../types/content-slug';
 
 interface ContentRow extends QueryResultRow {
   id: string;
@@ -118,6 +124,13 @@ interface PublishedCatalogContentRow extends QueryResultRow {
   description: string;
   published_at: Date;
 }
+
+interface ContentRouteRedirectRow extends QueryResultRow {
+  source_slug: string;
+  current_slug: string;
+}
+
+const CONTENT_ROUTE_ADVISORY_LOCK_NAMESPACE = 1129270852;
 
 @Injectable()
 export class ContentCatalogRepository {
@@ -252,6 +265,26 @@ export class ContentCatalogRepository {
          ORDER BY source.position`,
         [JSON.stringify(snapshot.catalog)],
       );
+      const routeRedirects = await client.query<ContentRouteRedirectRow>(
+        `SELECT redirect.source_slug, item.slug AS current_slug
+         FROM stack_atlas.content_route_redirects AS redirect
+         JOIN stack_atlas.content_items AS item
+           ON item.id = redirect.content_item_id
+          AND item.content_type = 'article'
+          AND item.status = 'PUBLISHED'
+          AND item.archived_at IS NULL
+         JOIN stack_atlas.content_revisions AS revision
+           ON revision.id = item.published_revision_id
+          AND revision.content_item_id = item.id
+         JOIN LATERAL (
+           SELECT 1
+           FROM stack_atlas.content_publications
+           WHERE content_item_id = item.id AND revision_id = revision.id
+           ORDER BY published_at DESC
+           LIMIT 1
+         ) AS publication ON true
+         ORDER BY redirect.source_slug`,
+      );
       return {
         sourceCommitSha: snapshot.source_commit_sha,
         checksumSha256: snapshot.checksum_sha256,
@@ -266,6 +299,12 @@ export class ContentCatalogRepository {
           description: row.description,
           publishedAt: row.published_at,
         })),
+        routeRedirects: routeRedirects.rows.map(
+          (row): ContentRouteRedirectState => ({
+            sourceSlug: row.source_slug,
+            currentSlug: row.current_slug,
+          }),
+        ),
       };
     });
   }
@@ -275,6 +314,8 @@ export class ContentCatalogRepository {
   ): Promise<ContentRevisionRecord> {
     try {
       return await this.database.transaction(async (client) => {
+        await this.lockRouteSlugs(client, [input.slug]);
+        await this.assertRouteNotHistoricallyReserved(client, input.slug);
         const contentId = randomUUID();
         const item = await client.query<ContentRow>(
           `INSERT INTO stack_atlas.content_items
@@ -322,6 +363,9 @@ export class ContentCatalogRepository {
         if (uniqueConstraint(error) === 'content_items_active_slug_unique') {
           throw new ContentSlugConflictError();
         }
+        if (uniqueConstraint(error) === 'content_route_redirects_pkey') {
+          throw new ContentRouteReservedError();
+        }
         throw new ContentIdentityConflictError();
       }
       throw error;
@@ -333,6 +377,8 @@ export class ContentCatalogRepository {
   ): Promise<PublishedContentRecord> {
     try {
       return await this.database.transaction(async (client) => {
+        await this.lockRouteSlugs(client, [input.slug]);
+        await this.assertRouteNotHistoricallyReserved(client, input.slug);
         const contentId = randomUUID();
         const item = await client.query<ContentRow>(
           `INSERT INTO stack_atlas.content_items
@@ -412,7 +458,71 @@ export class ContentCatalogRepository {
         if (uniqueConstraint(error) === 'content_items_active_slug_unique') {
           throw new ContentSlugConflictError();
         }
+        if (uniqueConstraint(error) === 'content_route_redirects_pkey') {
+          throw new ContentRouteReservedError();
+        }
         throw new ContentIdentityConflictError();
+      }
+      throw error;
+    }
+  }
+
+  async changeArticleRoute(
+    input: ChangeContentArticleRoute,
+  ): Promise<ContentLifecycleRecord> {
+    try {
+      return await this.database.transaction(async (client) => {
+        await this.lockRouteSlugs(client, [input.baseSlug, input.slug]);
+        const item = await this.lockContentItem(client, input.contentId);
+        if (item.slug !== input.baseSlug) {
+          throw new ContentRouteConflictError();
+        }
+        if (item.status === 'ARCHIVED') {
+          throw new ContentLifecycleTransitionError();
+        }
+        if (!isCanonicalArticleSlug(item.slug)) {
+          throw new ContentRouteRemediationRequiredError();
+        }
+        if (input.slug === item.slug) return mapLifecycle(item);
+
+        await this.assertRouteNotHistoricallyReserved(client, input.slug);
+        const activeOwner = await client.query<{ id: string } & QueryResultRow>(
+          `SELECT id
+           FROM stack_atlas.content_items
+           WHERE slug = $1 AND archived_at IS NULL AND id <> $2
+           LIMIT 1`,
+          [input.slug, input.contentId],
+        );
+        if (activeOwner.rows[0]) throw new ContentRouteReservedError();
+
+        await client.query(
+          `INSERT INTO stack_atlas.content_route_redirects
+             (source_slug, content_item_id, created_by)
+           VALUES ($1, $2, $3)`,
+          [item.slug, item.id, input.actorAccountId],
+        );
+        const result = await client.query<ContentRow>(
+          `UPDATE stack_atlas.content_items
+           SET slug = $2, updated_at = now()
+           WHERE id = $1 AND slug = $3 AND status <> 'ARCHIVED'
+           RETURNING id, content_key, content_type, slug, status,
+                     latest_revision_id, published_revision_id, created_by,
+                     archived_at, archived_by, created_at, updated_at`,
+          [input.contentId, input.slug, input.baseSlug],
+        );
+        const updated = result.rows[0];
+        if (!updated) throw new ContentRouteConflictError();
+        return mapLifecycle(updated);
+      });
+    } catch (error) {
+      if (
+        isUniqueViolation(error) &&
+        [
+          'content_items_active_slug_unique',
+          'content_route_redirects_pkey',
+        ].includes(uniqueConstraint(error) ?? '')
+      ) {
+        throw new ContentRouteReservedError();
       }
       throw error;
     }
@@ -873,12 +983,35 @@ export class ContentCatalogRepository {
   ): Promise<ContentLifecycleRecord> {
     try {
       return await this.database.transaction(async (client) => {
+        const serializesRoute =
+          input.nextStatus === 'ARCHIVED' ||
+          (input.expectedStatus === 'ARCHIVED' && input.nextStatus === 'DRAFT');
+        let lockedRouteSlug: string | null = null;
+        if (serializesRoute) {
+          const route = await client.query<{ slug: string } & QueryResultRow>(
+            `SELECT slug FROM stack_atlas.content_items WHERE id = $1`,
+            [input.contentId],
+          );
+          const currentRoute = route.rows[0];
+          if (!currentRoute) throw new ContentItemNotFoundError();
+          lockedRouteSlug = currentRoute.slug;
+          await this.lockRouteSlugs(client, [lockedRouteSlug]);
+        }
         const item = await this.lockContentItem(client, input.contentId);
+        if (lockedRouteSlug !== null && item.slug !== lockedRouteSlug) {
+          throw new ContentLifecycleConflictError();
+        }
         if (item.status !== input.expectedStatus) {
           throw new ContentLifecycleConflictError();
         }
         if (input.nextStatus === 'PUBLISHED') {
           throw new ContentLifecycleTransitionError();
+        }
+        if (
+          input.expectedStatus === 'ARCHIVED' &&
+          input.nextStatus === 'DRAFT'
+        ) {
+          await this.assertRouteNotHistoricallyReserved(client, item.slug);
         }
         const result = await client.query<ContentRow>(
           `UPDATE stack_atlas.content_items
@@ -928,6 +1061,32 @@ export class ContentCatalogRepository {
     const item = result.rows[0];
     if (!item) throw new ContentItemNotFoundError();
     return item;
+  }
+
+  private async lockRouteSlugs(
+    client: PoolClient,
+    slugs: readonly string[],
+  ): Promise<void> {
+    const ordered = [...new Set(slugs)].sort();
+    for (const slug of ordered) {
+      await client.query(
+        `SELECT pg_advisory_xact_lock($1::integer, hashtext($2))`,
+        [CONTENT_ROUTE_ADVISORY_LOCK_NAMESPACE, slug],
+      );
+    }
+  }
+
+  private async assertRouteNotHistoricallyReserved(
+    client: PoolClient,
+    slug: string,
+  ): Promise<void> {
+    const result = await client.query(
+      `SELECT 1
+       FROM stack_atlas.content_route_redirects
+       WHERE source_slug = $1`,
+      [slug],
+    );
+    if (result.rowCount) throw new ContentRouteReservedError();
   }
 
   private async insertRevision(

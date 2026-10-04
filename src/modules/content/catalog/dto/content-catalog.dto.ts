@@ -9,6 +9,7 @@ import {
   IsUUID,
   Max,
   MaxLength,
+  MinLength,
   Min,
 } from 'class-validator';
 import { CONTENT_STATUS } from '../types/content-catalog.types';
@@ -17,7 +18,7 @@ import { CANONICAL_ARTICLE_SLUG_PATTERN } from '../types/content-slug';
 
 const MAX_PAGE_SIZE = 100;
 const ADMIN_CONTENT_SLUG_DESCRIPTION =
-  'Persisted article route identity. New writes are canonical; historical rows may remain non-canonical until A01.2 remediation.';
+  'Persisted article route identity. New writes are canonical; historical rows may remain non-canonical until approved A01.2.2 remediation.';
 
 export class ListContentQueryDto {
   @ApiPropertyOptional({ default: 50, minimum: 1, maximum: MAX_PAGE_SIZE })
@@ -75,6 +76,31 @@ export class CreateContentDto {
   @ApiProperty({ type: () => ContentDocumentResponseDto })
   @IsObject()
   document!: Record<string, unknown>;
+}
+
+export class ChangeContentRouteDto {
+  @ApiProperty({
+    maxLength: 255,
+    minLength: 1,
+    example: 'articles/architecture/old-guide',
+    description: 'The exact persisted route the caller expects to replace.',
+  })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(255)
+  baseSlug!: string;
+
+  @ApiProperty({
+    maxLength: 1024,
+    minLength: 1,
+    example: 'articles/architecture/new-guide',
+    description:
+      'The replacement route is normalized and must become canonical articles/<domain>/<slug>; both route segments use lowercase ASCII letters, digits, and single hyphens.',
+  })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(1024)
+  slug!: string;
 }
 
 export class CreateContentRevisionDto {
@@ -510,7 +536,7 @@ export class PublicContentCatalogResponseDto {
   @ApiProperty({ type: [PublicCatalogArticleResponseDto], maxItems: 1000 })
   articles!: PublicCatalogArticleResponseDto[];
 
-  @ApiProperty({ type: [PublicCatalogRedirectResponseDto], maxItems: 10000 })
+  @ApiProperty({ type: [PublicCatalogRedirectResponseDto] })
   redirects!: PublicCatalogRedirectResponseDto[];
 }
 

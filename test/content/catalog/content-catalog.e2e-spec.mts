@@ -758,17 +758,249 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
 
     const canonicalSlug =
       'articles/architecture/canonical-' + randomUUID();
+    const canonicalContentKey = 'article:' + randomUUID();
     const canonicalCreate = await request(app.getHttpServer())
       .post('/api/v1/admin/content')
       .set('Origin', allowedOrigin)
       .set('Cookie', editor.cookie)
       .send({
-        contentKey: 'article:' + randomUUID(),
+        contentKey: canonicalContentKey,
         slug: canonicalSlug,
         document: contentDocument('Canonical route'),
       })
       .expect(201);
     expect(canonicalCreate.body.slug).toBe(canonicalSlug);
+
+    const unauthenticatedRouteChange = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .send({ baseSlug: canonicalSlug, slug: 'articles/architecture/route-b' })
+      .expect(401)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(unauthenticatedRouteChange.body.status).toBe(401);
+    await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', editor.cookie)
+      .send({ baseSlug: canonicalSlug, slug: 'articles/architecture/route-b' })
+      .expect(403)
+      .expect('Content-Type', /application\/problem\+json/);
+    const invalidRouteChange = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ baseSlug: canonicalSlug, slug: 'engineering/invalid-route' })
+      .expect(400)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(invalidRouteChange.body.code).toBe('invalid_content_route');
+    await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({
+        baseSlug: canonicalSlug,
+        slug: 'articles/architecture/route-b',
+        actorAccountId: editor.accountId,
+      })
+      .expect(400)
+      .expect('Content-Type', /application\/problem\+json/);
+
+    const routeB = `articles/architecture/route-b-${randomUUID()}`;
+    const routeC = `articles/architecture/route-c-${randomUUID()}`;
+    const firstChange = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ baseSlug: canonicalSlug, slug: routeB })
+      .expect(200);
+    expect(firstChange.body.slug).toBe(routeB);
+    const staleChange = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ baseSlug: canonicalSlug, slug: routeB })
+      .expect(409)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(staleChange.body).toMatchObject({
+      code: 'content_route_conflict',
+      retryable: true,
+    });
+    const secondChange = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ baseSlug: routeB, slug: routeC })
+      .expect(200);
+    expect(secondChange.body.slug).toBe(routeC);
+
+    const reservedDestination = `articles/architecture/reserved-${randomUUID()}`;
+    await request(app.getHttpServer())
+      .post('/api/v1/admin/content')
+      .set('Origin', allowedOrigin)
+      .set('Cookie', editor.cookie)
+      .send({
+        contentKey: 'article:' + randomUUID(),
+        slug: reservedDestination,
+        document: contentDocument('Reserved destination'),
+      })
+      .expect(201);
+    const reservedChange = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ baseSlug: routeC, slug: reservedDestination })
+      .expect(409)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(reservedChange.body.code).toBe('content_route_reserved');
+    const historicalDestination = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ baseSlug: routeC, slug: canonicalSlug })
+      .expect(409)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(historicalDestination.body.code).toBe('content_route_reserved');
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/submit-for-review`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', editor.cookie)
+      .expect(200);
+    await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/publish`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ revisionId: canonicalCreate.body.revisionId })
+      .expect(200);
+    const publisherSession = await pool.query<{ id: string }>(
+      `SELECT id FROM stack_atlas.sessions
+       WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()
+       ORDER BY expires_at DESC LIMIT 1`,
+      [publisher.accountId],
+    );
+    const sessionId = publisherSession.rows[0]?.id;
+    if (!sessionId) throw new Error('Expected an active publisher session.');
+    const routeSnapshot = {
+      schema_version: 1,
+      site: {
+        name: 'Stack Atlas',
+        description: 'Route mutation e2e fixture.',
+        language: 'en',
+      },
+      topics: [],
+      categories: [],
+      paths: [],
+      articles: [
+        {
+          sourceId: canonicalContentKey.slice('article:'.length),
+          contentKey: canonicalContentKey,
+          domain: 'architecture',
+          category: null,
+          tags: [],
+          difficulty: 'unspecified',
+          learningPaths: [],
+          prerequisites: [],
+          related: [],
+          labs: [],
+          authors: [],
+          kubernetes: null,
+          review: null,
+          legacyUrls: [],
+        },
+      ],
+      redirects: [],
+    };
+    await app.get(ContentCatalogService).storeGitContentCatalogSnapshot(
+      `${randomUUID().replaceAll('-', '')}${'0'.repeat(8)}`,
+      routeSnapshot,
+      { accountId: publisher.accountId, sessionId, email: publisher.email },
+    );
+    const routeCatalog = await request(app.getHttpServer())
+      .get('/api/v1/content/catalog')
+      .expect(200);
+    expect(routeCatalog.body.articles).toContainEqual(
+      expect.objectContaining({
+        contentId: canonicalCreate.body.contentId,
+        slug: routeC,
+        url: `/${routeC}/`,
+      }),
+    );
+    expect(routeCatalog.body.redirects).toEqual(
+      expect.arrayContaining([
+        { source: `/${canonicalSlug}/`, destination: `/${routeC}/`, kind: 'article' },
+        { source: `/${routeB}/`, destination: `/${routeC}/`, kind: 'article' },
+      ]),
+    );
+    const persistedRouteHistory = await pool.query(
+      `SELECT source_slug, content_item_id, created_by
+       FROM stack_atlas.content_route_redirects
+       WHERE content_item_id = $1 ORDER BY source_slug`,
+      [canonicalCreate.body.contentId],
+    );
+    expect(persistedRouteHistory.rows).toEqual(
+      [canonicalSlug, routeB]
+        .sort()
+        .map((source_slug) => ({
+          source_slug,
+          content_item_id: canonicalCreate.body.contentId,
+          created_by: publisher.accountId,
+        })),
+    );
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/archive`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .expect(200);
+    const archivedRouteChange = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${canonicalCreate.body.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({ baseSlug: routeC, slug: `articles/architecture/after-archive-${randomUUID()}` })
+      .expect(409)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(archivedRouteChange.body.code).toBe(
+      'content_lifecycle_transition_conflict',
+    );
+    const archivedRouteCatalog = await request(app.getHttpServer())
+      .get('/api/v1/content/catalog')
+      .expect(200);
+    expect(archivedRouteCatalog.body.articles).not.toContainEqual(
+      expect.objectContaining({ contentId: canonicalCreate.body.contentId }),
+    );
+    expect(archivedRouteCatalog.body.redirects).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: `/${canonicalSlug}/` }),
+        expect.objectContaining({ source: `/${routeB}/` }),
+      ]),
+    );
+
+    const routeLegacyDocument = validateContentDocument(
+      contentDocument('Legacy route change'),
+    );
+    const legacyForRouteChange = await app
+      .get(ContentCatalogRepository)
+      .createArticle({
+        contentKey: 'article:' + randomUUID(),
+        slug: 'engineering/legacy-route-change-' + randomUUID(),
+        actorAccountId: editor.accountId,
+        document: routeLegacyDocument,
+        checksumSha256: checksumContent(routeLegacyDocument),
+      });
+    const remediationRequired = await request(app.getHttpServer())
+      .post(`/api/v1/admin/content/${legacyForRouteChange.contentId}/change-route`)
+      .set('Origin', allowedOrigin)
+      .set('Cookie', publisher.cookie)
+      .send({
+        baseSlug: legacyForRouteChange.slug,
+        slug: `articles/architecture/remediated-${randomUUID()}`,
+      })
+      .expect(409)
+      .expect('Content-Type', /application\/problem\+json/);
+    expect(remediationRequired.body).toMatchObject({
+      code: 'content_route_remediation_required',
+      retryable: false,
+    });
 
     const malformedLookup = await request(app.getHttpServer())
       .get('/api/v1/content/' + encodeURIComponent('engineering/new-guide'))
@@ -856,6 +1088,7 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       ['/api/v1/admin/content', 'get'],
       ['/api/v1/admin/content', 'post'],
       ['/api/v1/admin/content/{id}', 'get'],
+      ['/api/v1/admin/content/{id}/change-route', 'post'],
       ['/api/v1/admin/content/{id}/revisions', 'get'],
       ['/api/v1/admin/content/{id}/revisions/{revisionId}', 'get'],
       ['/api/v1/admin/content/{id}/revisions', 'post'],
@@ -912,6 +1145,32 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
         '400',
       )?.['description'],
     ).toContain('invalid_content_route');
+    const changeRouteOperation = recordProperty(
+      paths?.['/api/v1/admin/content/{id}/change-route'],
+      'post',
+    );
+    const changeRouteResponses = recordProperty(
+      changeRouteOperation,
+      'responses',
+    );
+    for (const status of ['200', '400', '401', '403', '404', '409']) {
+      expect(changeRouteResponses?.[status]).toBeDefined();
+    }
+    expect(
+      recordProperty(changeRouteResponses, '409')?.['description'],
+    ).toContain('content_route_conflict');
+    const routeRequestBody = recordProperty(
+      changeRouteOperation,
+      'requestBody',
+    );
+    const routeRequestContent = recordProperty(routeRequestBody, 'content');
+    const routeJsonBody = recordProperty(
+      routeRequestContent?.['application/json'],
+      'schema',
+    );
+    expect(routeJsonBody?.['$ref']).toBe(
+      '#/components/schemas/ChangeContentRouteDto',
+    );
 
     const schemas = recordProperty(
       recordProperty(response.body, 'components'),
@@ -926,6 +1185,24 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
       description:
         'Article route normalized and stored as articles/<domain>/<slug>; both segments use lowercase ASCII letters, digits, and single hyphens.',
     });
+    const changeRouteProperties = recordProperty(
+      schemas?.['ChangeContentRouteDto'],
+      'properties',
+    );
+    expect(recordProperty(changeRouteProperties, 'baseSlug')).toMatchObject({
+      minLength: 1,
+      maxLength: 255,
+      example: 'articles/architecture/old-guide',
+    });
+    expect(recordProperty(changeRouteProperties, 'slug')).toMatchObject({
+      minLength: 1,
+      maxLength: 1024,
+      example: 'articles/architecture/new-guide',
+    });
+    expect(recordProperty(changeRouteProperties, 'slug')?.['pattern']).toBeUndefined();
+    expect(recordProperty(changeRouteProperties, 'slug')?.['description']).toContain(
+      'canonical articles/<domain>/<slug>',
+    );
     const itemProperties = recordProperty(
       schemas?.['ContentItemResponseDto'],
       'properties',
@@ -934,7 +1211,7 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     expect(itemSlug?.['pattern']).toBeUndefined();
     expect(itemSlug?.['description']).toContain('New writes are canonical');
     expect(itemSlug?.['description']).toContain(
-      'historical rows may remain non-canonical until A01.2 remediation',
+      'historical rows may remain non-canonical until approved A01.2.2 remediation',
     );
     const revisionProperties = recordProperty(
       schemas?.['ContentRevisionResponseDto'],
@@ -943,7 +1220,7 @@ describe('content catalog HTTP and PostgreSQL flow', () => {
     const revisionSlug = recordProperty(revisionProperties, 'slug');
     expect(revisionSlug?.['pattern']).toBeUndefined();
     expect(revisionSlug?.['description']).toContain(
-      'historical rows may remain non-canonical until A01.2 remediation',
+      'historical rows may remain non-canonical until approved A01.2.2 remediation',
     );
     expect(
       JSON.stringify(schemas?.['PublishedContentResponseDto']),
